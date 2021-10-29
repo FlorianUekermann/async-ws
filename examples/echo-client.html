@@ -1,0 +1,33 @@
+<html ng-app="app" xmlns="http://www.w3.org/1999/html">
+<head>
+    <script type="text/javascript">
+        function connect() {
+            let input = document.getElementById("input");
+            let button = document.getElementById("button");
+            button.disabled = true;
+
+            let ws = new WebSocket("ws://localhost:8080");
+            ws.onmessage = (event) => console.log("message", event.data);
+            ws.onclose = ws.onerror = (event) => {
+                console.log("closed", event);
+                button.value = "connect";
+                button.onclick = connect;
+                input.disabled = true;
+            }
+            ws.onopen = () => {
+                console.log("ws opened");
+                input.disabled = false;
+                button.value="send";
+                button.disabled = false;
+                button.onclick = function() {
+                    ws.send(input.value);
+                }
+            };
+        }
+    </script>
+</head>
+<body>
+    <textarea type="text" id="input" cols="80" rows="10" disabled />hello</textarea><br />
+    <input type="button" id="button" value="connect" onclick="connect()" />
+</body>
+</html>
