@@ -58,11 +58,10 @@ pub struct FrameHeadDecode<T: AsyncRead + Unpin> {
 impl<T: AsyncRead + Unpin> Future for FrameHeadDecode<T> {
     type Output = anyhow::Result<(T, FrameHead)>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let mut transport = this.transport.take().unwrap();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut transport = self.transport.take().unwrap();
         loop {
-            let min = match parse_frame_info(&this.buffer[0..this.buffer_len]) {
+            let min = match parse_frame_info(&self.buffer[0..self.buffer_len]) {
                 Ok(info) => {
                     return Poll::Ready(Ok((transport, info)));
                 }
@@ -71,11 +70,12 @@ impl<T: AsyncRead + Unpin> Future for FrameHeadDecode<T> {
                     return Poll::Ready(Err(err.into()));
                 }
             };
-            match Pin::new(&mut transport).poll_read(cx, &mut this.buffer[this.buffer_len..min]) {
-                Poll::Ready(Ok(n)) => this.buffer_len += n,
+            let buffer_len = self.buffer_len;
+            match Pin::new(&mut transport).poll_read(cx, &mut self.buffer[buffer_len..min]) {
+                Poll::Ready(Ok(n)) => self.buffer_len += n,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
                 Poll::Pending => {
-                    this.transport = Some(transport);
+                    self.transport = Some(transport);
                     return Poll::Pending;
                 }
             }
