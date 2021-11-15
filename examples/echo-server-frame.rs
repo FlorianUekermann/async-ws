@@ -46,11 +46,7 @@ fn main() {
 
             let frame_head_decoder = FrameHeadDecoder::default();
             loop {
-                let frame_head = frame_head_decoder
-                    .decode_ref(&mut transport)
-                    .await
-                    .unwrap()
-                    .1;
+                let frame_head = frame_head_decoder.decode(&mut transport).await.unwrap().1;
                 let mut frame_payload = Vec::new();
                 let mut frame_payload_reader = frame_head.payload_reader(&mut transport);
                 frame_payload_reader

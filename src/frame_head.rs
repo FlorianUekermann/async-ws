@@ -1,8 +1,6 @@
 use crate::frame_payload::FramePayloadReader;
 use futures_lite::prelude::*;
 use futures_lite::AsyncRead;
-use std::borrow::BorrowMut;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -20,21 +18,13 @@ pub enum Opcode {
 pub struct FrameHeadDecoder {}
 
 impl FrameHeadDecoder {
-    pub fn decode<T: AsyncRead + Unpin, R: BorrowMut<T>>(
-        self,
-        transport: R,
-    ) -> FrameHeadDecode<T, R> {
+    pub fn decode<T: AsyncRead + Unpin>(self, transport: T) -> FrameHeadDecode<T> {
         FrameHeadDecode {
             buffer: [0u8; 14],
             buffer_len: 0,
             transport: Some(transport),
             decoder: self,
-            complete: false,
-            p: Default::default(),
         }
-    }
-    pub fn decode_ref<T: AsyncRead + Unpin>(self, transport: &mut T) -> FrameHeadDecode<T, &mut T> {
-        self.decode(transport)
     }
 }
 
@@ -58,42 +48,37 @@ impl FrameHead {
     }
 }
 
-#[pin_project::pin_project]
-pub struct FrameHeadDecode<T: AsyncRead + Unpin, R: BorrowMut<T>> {
+pub struct FrameHeadDecode<T: AsyncRead + Unpin> {
     buffer: [u8; 14],
     buffer_len: usize,
-    transport: Option<R>,
+    transport: Option<T>,
+    #[allow(dead_code)]
     decoder: FrameHeadDecoder,
-    complete: bool,
-    p: PhantomData<*const T>,
 }
 
-impl<T: AsyncRead + Unpin, R: BorrowMut<T>> Future for FrameHeadDecode<T, R> {
-    type Output = anyhow::Result<(R, FrameHead)>;
+impl<T: AsyncRead + Unpin> Future for FrameHeadDecode<T> {
+    type Output = anyhow::Result<(T, FrameHead)>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        assert_ne!(self.complete, true);
-        let this = self.project();
+        let this = self.get_mut();
+        let mut transport = this.transport.take().unwrap();
         loop {
-            let min = match parse_frame_info(&this.buffer[0..*this.buffer_len]) {
+            let min = match parse_frame_info(&this.buffer[0..this.buffer_len]) {
                 Ok(info) => {
-                    *this.complete = true;
-                    return Poll::Ready(Ok((this.transport.take().unwrap(), info)));
+                    return Poll::Ready(Ok((transport, info)));
                 }
                 Err(FrameHeadParseError::Incomplete(min)) => min,
                 Err(err) => {
-                    *this.complete = true;
                     return Poll::Ready(Err(err.into()));
                 }
             };
-            let transport = Pin::new(this.transport.as_mut().unwrap().borrow_mut());
-            match transport.poll_read(cx, &mut this.buffer[*this.buffer_len..min]) {
-                Poll::Ready(Ok(n)) => *this.buffer_len += n,
-                Poll::Ready(Err(err)) => {
-                    *this.complete = true;
-                    return Poll::Ready(Err(err.into()));
+            match Pin::new(&mut transport).poll_read(cx, &mut this.buffer[this.buffer_len..min]) {
+                Poll::Ready(Ok(n)) => this.buffer_len += n,
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+                Poll::Pending => {
+                    this.transport = Some(transport);
+                    return Poll::Pending;
                 }
-                Poll::Pending => return Poll::Pending,
             }
         }
     }
