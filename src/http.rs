@@ -1,4 +1,3 @@
-use anyhow::bail;
 use http::{HeaderValue, Request, Response, StatusCode};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
 
@@ -25,12 +24,12 @@ pub fn is_upgrade_request(request: &Request<()>) -> bool {
         && request.headers().get("Sec-WebSocket-Key").is_some()
 }
 
-pub fn upgrade_response(request: &Request<()>) -> anyhow::Result<Response<()>> {
+pub fn upgrade_response(request: &Request<()>) -> Option<Response<()>> {
     let challenge = match (
         is_upgrade_request(request),
         request.headers().get("Sec-WebSocket-Key"),
     ) {
-        (false, _) | (true, None) => bail!("not an upgrade request"),
+        (false, _) | (true, None) => return None,
         (true, Some(challenge)) => challenge.as_bytes(),
     };
 
@@ -43,8 +42,9 @@ pub fn upgrade_response(request: &Request<()>) -> anyhow::Result<Response<()>> {
             "Sec-WebSocket-Accept",
             upgrade_challenge_response(challenge),
         )
-        .body(())?;
-    Ok(response)
+        .body(())
+        .unwrap();
+    Some(response)
 }
 
 fn upgrade_challenge_response(challenge: &[u8]) -> String {

@@ -9,13 +9,12 @@ license = "Apache-2.0 OR MIT"
 http = "0.2.5"
 futures-lite = "1.12.0"
 async-http-codec = "0.1.0"
-anyhow = "1.0.44"
 ring = "0.16"
 base64 = "0.13.0"
 log = "0.4.14"
-pin-project = "1.0.8"
 thiserror = "1.0.30"
+rand = "0.8.4"
 
 [dev-dependencies]
-async-net-server-utils = { git = "https://github.com/FlorianUekermann/async-net-server-utils", version="*" }
+async-net-server-utils = { git = "https://github.com/FlorianUekermann/async-net-server-utils" }
 simple_logger = "1.13.0"
