@@ -23,7 +23,7 @@ impl FrameHeadDecoder {
             buffer: [0u8; 14],
             buffer_len: 0,
             transport: Some(transport),
-            decoder: self,
+            _decoder: self,
         }
     }
 }
@@ -52,8 +52,7 @@ pub struct FrameHeadDecode<T: AsyncRead + Unpin> {
     buffer: [u8; 14],
     buffer_len: usize,
     transport: Option<T>,
-    #[allow(dead_code)]
-    decoder: FrameHeadDecoder,
+    _decoder: FrameHeadDecoder,
 }
 
 impl<T: AsyncRead + Unpin> Future for FrameHeadDecode<T> {
