@@ -1,23 +1,21 @@
-use crate::frame::{mask, FrameHead, Opcode};
-use futures_lite::prelude::*;
+use crate::frame::{mask, FrameHead, WsOpcode};
+use futures::prelude::*;
 use rand::prelude::*;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 #[derive(Copy, Clone, Debug)]
-pub struct FrameEncoder<R: RngCore = StdRng> {
-    pub mask_rng: Option<R>,
+pub struct FrameEncoder {
+    pub mask: bool,
 }
 
-impl FrameEncoder<StdRng> {
+impl FrameEncoder {
     pub fn client() -> Self {
-        Self {
-            mask_rng: Some(StdRng::from_entropy()),
-        }
+        Self { mask: true }
     }
     pub fn server() -> Self {
-        Self { mask_rng: None }
+        Self { mask: false }
     }
 }
 
@@ -25,21 +23,29 @@ impl FrameEncoder {
     pub fn encode<'a, T: AsyncWrite + Unpin>(
         &mut self,
         transport: T,
-        opcode: Opcode,
+        opcode: WsOpcode,
         fin: bool,
         payload: &'a mut [u8],
     ) -> FrameEncode<'a, T> {
+        let mask = match self.mask {
+            true => thread_rng().next_u32().to_ne_bytes(),
+            false => [0u8, 0u8, 0u8, 0u8],
+        };
         let head = FrameHead {
             fin,
             opcode,
-            mask: self
-                .mask_rng
-                .as_mut()
-                .map_or([0u8, 0u8, 0u8, 0u8], |rng| rng.next_u32().to_ne_bytes()),
+            mask,
             payload_len: payload.len() as u64,
         };
         FrameEncode::new(transport, head, payload)
     }
+    // pub fn encode_control<'a, T: AsyncWrite + Unpin>(
+    //     &mut self,
+    //     transport: T,
+    //     mut frame: WsControlFrame,
+    // ) -> FrameEncode<'a, T> {
+    //     self.encode(transport, frame.opcode(), true, &mut frame.payload.buffer[0..frame.payload.len()])
+    // }
 }
 
 #[derive(Copy, Clone, Debug)]

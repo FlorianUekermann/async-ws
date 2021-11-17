@@ -1,8 +1,9 @@
 use async_http_codec::head::encode::ResponseHeadEncoder;
 use async_net_server_utils::tcp::TcpIncoming;
-use async_ws::frame::{FrameEncoder, FrameHead, WsOpcode};
+use async_ws::frame::{FrameEncoder, FrameHeadDecoder, WsOpcode};
 use async_ws::http::{is_upgrade_request, upgrade_response};
 use futures::executor::block_on;
+use futures::future::block_on;
 use futures::prelude::*;
 use http::{HeaderValue, Response};
 use log::LevelFilter;
@@ -30,7 +31,7 @@ fn main() {
                     .body(())
                     .unwrap();
                 response_encoder
-                    .encode(&mut transport, response)
+                    .encode_ref(&mut transport, response)
                     .await
                     .unwrap();
                 transport.write_all(CLIENT_HTML.as_ref()).await.unwrap();
@@ -40,34 +41,9 @@ fn main() {
             log::info!("upgrade request received");
             let response = upgrade_response(&request).unwrap();
             response_encoder
-                .encode(&mut transport, response)
+                .encode_ref(&mut transport, response)
                 .await
                 .unwrap();
-
-            let mut frame_encoder = FrameEncoder::server();
-            loop {
-                let frame_head = FrameHead::decode(&mut transport).await.unwrap().1;
-                let mut frame_payload = Vec::new();
-                let mut frame_payload_reader = frame_head.payload_reader(&mut transport);
-                frame_payload_reader
-                    .read_to_end(&mut frame_payload)
-                    .await
-                    .unwrap();
-                log::info!(
-                    "received {:?} frame: {:?}",
-                    frame_head.opcode,
-                    &frame_payload
-                );
-
-                let opcode = match frame_head.opcode {
-                    WsOpcode::Ping => WsOpcode::Pong,
-                    opcode => opcode,
-                };
-                frame_encoder
-                    .encode(&mut transport, opcode, frame_head.fin, &mut frame_payload)
-                    .await
-                    .unwrap();
-            }
         }
     })
 }

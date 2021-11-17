@@ -1,12 +1,12 @@
-mod decoder;
+mod decode;
 
-pub use decoder::*;
+pub use decode::*;
 
-use crate::frame::FramePayloadReader;
-use futures_lite::AsyncRead;
+use crate::frame::{FramePayloadReader, FramePayloadReaderState};
+use futures::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
-pub enum Opcode {
+pub enum WsOpcode {
     Continuation,
     Text,
     Binary,
@@ -18,14 +18,17 @@ pub enum Opcode {
 #[derive(Copy, Clone, Debug)]
 pub struct FrameHead {
     pub fin: bool,
-    pub opcode: Opcode,
+    pub opcode: WsOpcode,
     pub mask: [u8; 4],
     pub payload_len: u64,
 }
 
 impl FrameHead {
+    pub fn decode<T: AsyncRead + Unpin>(transport: T) -> FrameHeadDecode<T> {
+        FrameHeadDecodeState::new().restore(transport)
+    }
     pub fn payload_reader<T: AsyncRead + Unpin>(self, transport: T) -> FramePayloadReader<T> {
-        FramePayloadReader::new(transport, self.mask, self.payload_len)
+        FramePayloadReaderState::new(self.mask, self.payload_len).restore(transport)
     }
     pub fn parse(buffer: &[u8]) -> Result<FrameHead, FrameHeadParseError> {
         if buffer.len() < 2 {
@@ -49,12 +52,12 @@ impl FrameHead {
             _ => return Err(FrameHeadParseError::RsvBit),
         };
         let opcode = match buffer[0] & 0x0F {
-            0x0 => Opcode::Continuation,
-            0x1 => Opcode::Text,
-            0x2 => Opcode::Binary,
-            0x8 => Opcode::Close,
-            0x9 => Opcode::Ping,
-            0xA => Opcode::Pong,
+            0x0 => WsOpcode::Continuation,
+            0x1 => WsOpcode::Text,
+            0x2 => WsOpcode::Binary,
+            0x8 => WsOpcode::Close,
+            0x9 => WsOpcode::Ping,
+            0xA => WsOpcode::Pong,
             n => return Err(FrameHeadParseError::InvalidOpcode(n)),
         };
         let mut payload_len = [0u8; 8];
@@ -93,12 +96,12 @@ impl FrameHead {
     pub fn encode(&self, buffer: &mut [u8]) {
         buffer[0] = self.fin as u8 * 0x80;
         buffer[0] += match self.opcode {
-            Opcode::Continuation => 0x0,
-            Opcode::Text => 0x1,
-            Opcode::Binary => 0x2,
-            Opcode::Close => 0x8,
-            Opcode::Ping => 0x9,
-            Opcode::Pong => 0xA,
+            WsOpcode::Continuation => 0x0,
+            WsOpcode::Text => 0x1,
+            WsOpcode::Binary => 0x2,
+            WsOpcode::Close => 0x8,
+            WsOpcode::Ping => 0x9,
+            WsOpcode::Pong => 0xA,
         };
         buffer[1] = match self.payload_len {
             0..=125 => self.payload_len as u8,

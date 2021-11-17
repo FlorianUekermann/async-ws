@@ -1,35 +1,49 @@
 use crate::frame::mask;
-use futures_lite::prelude::*;
+use futures::prelude::*;
 use std::convert::TryFrom;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 pub struct FramePayloadReader<T: AsyncRead + Unpin> {
     transport: T,
+    state: FramePayloadReaderState,
+}
+
+impl<T: AsyncRead + Unpin> FramePayloadReader<T> {
+    pub fn into_inner(self) -> T {
+        self.transport
+    }
+    pub fn checkpoint(self) -> (T, FramePayloadReaderState) {
+        (self.transport, self.state)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct FramePayloadReaderState {
     mask: [u8; 4],
     payload_len: u64,
     completion: u64,
 }
 
-impl<T: AsyncRead + Unpin> FramePayloadReader<T> {
-    pub fn new(transport: T, mask: [u8; 4], payload_len: u64) -> Self {
+impl FramePayloadReaderState {
+    pub fn new(mask: [u8; 4], payload_len: u64) -> Self {
         Self {
-            transport,
             mask,
             payload_len,
             completion: 0,
         }
     }
-    pub fn into_inner(self) -> T {
-        self.transport
+    pub fn restore<T: AsyncRead + Unpin>(self, transport: T) -> FramePayloadReader<T> {
+        FramePayloadReader {
+            transport,
+            state: self,
+        }
     }
-}
-
-impl<T: AsyncRead + Unpin> AsyncRead for FramePayloadReader<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
+    pub fn poll_read<T: AsyncRead + Unpin>(
+        &mut self,
+        transport: &mut T,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
@@ -40,7 +54,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for FramePayloadReader<T> {
             Ok(remainder) => remainder.max(buf.len()),
             Err(_) => buf.len(),
         };
-        match Pin::new(&mut self.transport).poll_read(cx, &mut buf[0..max]) {
+        match Pin::new(transport).poll_read(cx, &mut buf[0..max]) {
             Poll::Ready(Ok(n)) => match n {
                 0 => Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof))),
                 n => {
@@ -51,5 +65,16 @@ impl<T: AsyncRead + Unpin> AsyncRead for FramePayloadReader<T> {
             },
             p => p,
         }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for FramePayloadReader<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let Self { transport, state } = self.get_mut();
+        state.poll_read(transport, cx, buf)
     }
 }

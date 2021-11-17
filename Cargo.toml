@@ -7,8 +7,7 @@ license = "Apache-2.0 OR MIT"
 
 [dependencies]
 http = "0.2.5"
-futures-lite = "1.12.0"
-async-http-codec = "0.1.0"
+futures = "0.3.17"
 ring = "0.16"
 base64 = "0.13.0"
 log = "0.4.14"
@@ -16,5 +15,6 @@ thiserror = "1.0.30"
 rand = "0.8.4"
 
 [dev-dependencies]
+async-http-codec = { git = "https://github.com/FlorianUekermann/async-http-codec" }
 async-net-server-utils = { git = "https://github.com/FlorianUekermann/async-net-server-utils" }
 simple_logger = "1.13.0"
