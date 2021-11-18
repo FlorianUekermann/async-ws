@@ -1,4 +1,3 @@
-mod read_state;
 mod message_reader;
 
 use futures::prelude::*;

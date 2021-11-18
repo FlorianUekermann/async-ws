@@ -7,20 +7,42 @@ pub use encode::*;
 pub use frame_head::*;
 pub use frame_payload::*;
 
+use crate::frame::decode::{FrameDecoder, FrameDecoderState};
 use futures::prelude::*;
 
-pub enum WsFrame<T: AsyncRead + Unpin> {
+#[derive(Copy, Clone, Debug)]
+pub enum WsFrame {
     Control(WsControlFrame),
-    Data {
-        kind: WsDataFrameKind,
-        payload: FramePayloadReader<T>,
-    },
+    Data(WsDataFrame),
+}
+
+impl WsFrame {
+    pub fn decode<T: AsyncRead + Unpin>(transport: T) -> FrameDecoder<T> {
+        FrameDecoderState::new().restore(transport)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum WsFrameKind {
+    Control(WsControlFrameKind),
+    Data(WsDataFrameKind),
 }
 
 #[derive(Copy, Clone, Debug)]
 pub enum WsDataFrameKind {
     Text,
     Binary,
+    Continuation,
+}
+
+impl WsDataFrameKind {
+    pub fn opcode(self) -> WsOpcode {
+        match self {
+            WsDataFrameKind::Text => WsOpcode::Text,
+            WsDataFrameKind::Binary => WsOpcode::Binary,
+            WsDataFrameKind::Continuation => WsOpcode::Continuation,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -28,6 +50,36 @@ pub enum WsControlFrameKind {
     Ping,
     Pong,
     Close,
+}
+
+impl WsControlFrameKind {
+    pub fn opcode(self) -> WsOpcode {
+        match self {
+            WsControlFrameKind::Ping => WsOpcode::Ping,
+            WsControlFrameKind::Pong => WsOpcode::Pong,
+            WsControlFrameKind::Close => WsOpcode::Close,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct WsDataFrame {
+    kind: WsDataFrameKind,
+    fin: bool,
+    mask: [u8; 4],
+    payload_len: u64,
+}
+
+impl WsDataFrame {
+    pub fn payload_reader<T: AsyncRead + Unpin>(&self, transport: T) -> FramePayloadReader<T> {
+        FramePayloadReaderState::new(self.mask, self.payload_len).restore(transport)
+    }
+    pub fn kind(&self) -> WsDataFrameKind {
+        self.kind
+    }
+    pub fn fin(&self) -> bool {
+        self.fin
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -46,13 +98,6 @@ impl WsControlFrame {
     }
     pub fn kind(&self) -> WsControlFrameKind {
         self.kind
-    }
-    pub fn opcode(&self) -> WsOpcode {
-        match self.kind {
-            WsControlFrameKind::Ping => WsOpcode::Ping,
-            WsControlFrameKind::Pong => WsOpcode::Pong,
-            WsControlFrameKind::Close => WsOpcode::Close,
-        }
     }
 }
 

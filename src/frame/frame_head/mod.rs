@@ -2,7 +2,9 @@ mod decode;
 
 pub use decode::*;
 
-use crate::frame::{FramePayloadReader, FramePayloadReaderState};
+use crate::frame::{
+    FramePayloadReader, FramePayloadReaderState, WsControlFrameKind, WsDataFrameKind, WsFrameKind,
+};
 use futures::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -13,6 +15,19 @@ pub enum WsOpcode {
     Close,
     Ping,
     Pong,
+}
+
+impl WsOpcode {
+    pub fn frame_kind(self) -> WsFrameKind {
+        match self {
+            WsOpcode::Continuation => WsFrameKind::Data(WsDataFrameKind::Continuation),
+            WsOpcode::Text => WsFrameKind::Data(WsDataFrameKind::Text),
+            WsOpcode::Binary => WsFrameKind::Data(WsDataFrameKind::Binary),
+            WsOpcode::Close => WsFrameKind::Control(WsControlFrameKind::Close),
+            WsOpcode::Ping => WsFrameKind::Control(WsControlFrameKind::Ping),
+            WsOpcode::Pong => WsFrameKind::Control(WsControlFrameKind::Pong),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
