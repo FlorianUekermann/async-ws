@@ -1,9 +1,8 @@
 use async_http_codec::head::encode::ResponseHeadEncoder;
 use async_net_server_utils::tcp::TcpIncoming;
-use async_ws::frame::{FrameEncoder, FrameHeadDecoder, WsOpcode};
+use async_ws::connection::{WsConfig, WsConnection};
 use async_ws::http::{is_upgrade_request, upgrade_response};
 use futures::executor::block_on;
-use futures::future::block_on;
 use futures::prelude::*;
 use http::{HeaderValue, Response};
 use log::LevelFilter;
@@ -31,7 +30,7 @@ fn main() {
                     .body(())
                     .unwrap();
                 response_encoder
-                    .encode_ref(&mut transport, response)
+                    .encode(&mut transport, response)
                     .await
                     .unwrap();
                 transport.write_all(CLIENT_HTML.as_ref()).await.unwrap();
@@ -41,9 +40,17 @@ fn main() {
             log::info!("upgrade request received");
             let response = upgrade_response(&request).unwrap();
             response_encoder
-                .encode_ref(&mut transport, response)
+                .encode(&mut transport, response)
                 .await
                 .unwrap();
+            let mut ws = WsConnection::with_config(transport, WsConfig::server());
+            while let Some(event) = ws.next().await {
+                let message_kind = event.unwrap();
+                let mut payload = Vec::new();
+                ws.read_to_end(&mut payload).await.unwrap();
+                log::info!("received {:?} message: {:?}", message_kind, payload);
+            }
+            log::info!("connection closed")
         }
     })
 }

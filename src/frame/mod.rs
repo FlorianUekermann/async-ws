@@ -3,11 +3,11 @@ mod encode;
 mod frame_head;
 mod frame_payload;
 
+pub use decode::*;
 pub use encode::*;
 pub use frame_head::*;
 pub use frame_payload::*;
 
-use crate::frame::decode::{FrameDecoder, FrameDecoderState};
 use futures::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -64,10 +64,10 @@ impl WsControlFrameKind {
 
 #[derive(Copy, Clone, Debug)]
 pub struct WsDataFrame {
-    kind: WsDataFrameKind,
-    fin: bool,
-    mask: [u8; 4],
-    payload_len: u64,
+    pub(crate) kind: WsDataFrameKind,
+    pub(crate) fin: bool,
+    pub(crate) mask: [u8; 4],
+    pub(crate) payload_len: u64,
 }
 
 impl WsDataFrame {
@@ -80,12 +80,18 @@ impl WsDataFrame {
     pub fn fin(&self) -> bool {
         self.fin
     }
+    pub fn mask(&self) -> [u8; 4] {
+        self.mask
+    }
+    pub fn payload_len(&self) -> u64 {
+        self.payload_len
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct WsControlFrame {
-    kind: WsControlFrameKind,
-    payload: WsControlFramePayload,
+    pub(crate) kind: WsControlFrameKind,
+    pub(crate) payload: WsControlFramePayload,
 }
 
 impl WsControlFrame {

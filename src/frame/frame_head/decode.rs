@@ -38,29 +38,21 @@ impl FrameHeadDecodeState {
     }
     pub fn poll<T: AsyncRead + Unpin>(
         &mut self,
-        transport: &mut Option<T>,
+        transport: &mut T,
         cx: &mut Context<'_>,
-    ) -> Poll<<FrameHeadDecode<T> as Future>::Output> {
-        let mut t = transport.take().unwrap();
+    ) -> Poll<Result<FrameHead, FrameDecodeError>> {
         loop {
             let min = match FrameHead::parse(&self.buffer[0..self.buffer_len]) {
-                Ok(info) => {
-                    return Poll::Ready(Ok((t, info)));
-                }
+                Ok(info) => return Poll::Ready(Ok(info)),
                 Err(FrameHeadParseError::Incomplete(min)) => min,
-                Err(err) => {
-                    return Poll::Ready(Err(err.into()));
-                }
+                Err(err) => return Poll::Ready(Err(err.into())),
             };
             let buffer_len = self.buffer_len;
             let read_window = &mut self.buffer[buffer_len..min];
-            match Pin::new(&mut t).poll_read(cx, read_window) {
+            match Pin::new(&mut *transport).poll_read(cx, read_window) {
                 Poll::Ready(Ok(n)) => self.buffer_len += n,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
-                Poll::Pending => {
-                    *transport = Some(t);
-                    return Poll::Pending;
-                }
+                Poll::Pending => return Poll::Pending,
             }
         }
     }
@@ -69,8 +61,15 @@ impl FrameHeadDecodeState {
 impl<T: AsyncRead + Unpin> Future for FrameHeadDecode<T> {
     type Output = Result<(T, FrameHead), FrameDecodeError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Self { transport, state } = self.get_mut();
-        state.poll(transport, cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut transport = self.transport.take().unwrap();
+        match self.state.poll(&mut transport, cx) {
+            Poll::Ready(Ok(frame_head)) => Poll::Ready(Ok((transport, frame_head))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                self.transport = Some(transport);
+                Poll::Pending
+            }
+        }
     }
 }

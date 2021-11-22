@@ -38,25 +38,22 @@ impl FrameDecoderState {
             state: self,
         }
     }
-    fn poll<T: AsyncRead + Unpin>(
+    pub fn poll<T: AsyncRead + Unpin>(
         &mut self,
-        transport: &mut Option<T>,
+        transport: &mut T,
         cx: &mut Context<'_>,
-    ) -> Poll<<FrameDecoder<T> as Future>::Output> {
+    ) -> Poll<Result<WsFrame, FrameDecodeError>> {
         loop {
             match self {
                 FrameDecoderState::Head(state) => match state.poll(transport, cx) {
-                    Poll::Ready(Ok((t, frame_head))) => match frame_head.opcode.frame_kind() {
+                    Poll::Ready(Ok(frame_head)) => match frame_head.opcode.frame_kind() {
                         WsFrameKind::Data(frame_kind) => {
-                            return Poll::Ready(Ok((
-                                t,
-                                WsFrame::Data(WsDataFrame {
-                                    kind: frame_kind,
-                                    fin: frame_head.fin,
-                                    mask: frame_head.mask,
-                                    payload_len: frame_head.payload_len,
-                                }),
-                            )))
+                            return Poll::Ready(Ok(WsFrame::Data(WsDataFrame {
+                                kind: frame_kind,
+                                fin: frame_head.fin,
+                                mask: frame_head.mask,
+                                payload_len: frame_head.payload_len,
+                            })))
                         }
                         WsFrameKind::Control(frame_kind) => {
                             *self = FrameDecoderState::ControlPayload {
@@ -72,27 +69,21 @@ impl FrameDecoderState {
                                     frame_head.payload_len,
                                 ),
                             };
-                            *transport = Some(t);
                         }
                     },
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Pending => return Poll::Pending,
                 },
                 FrameDecoderState::ControlPayload { frame, reader } => {
-                    let mut t = transport.take().unwrap();
-                    match reader.poll_read(&mut t, cx, &mut frame.payload.buffer) {
+                    match reader.poll_read(transport, cx, &mut frame.payload.buffer) {
                         Poll::Ready(Ok(n)) => {
                             if n == 0 {
-                                return Poll::Ready(Ok((t, WsFrame::Control(*frame))));
+                                return Poll::Ready(Ok(WsFrame::Control(*frame)));
                             }
-                            *transport = Some(t);
                             frame.payload.len += n as u8
                         }
                         Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
-                        Poll::Pending => {
-                            *transport = Some(t);
-                            return Poll::Pending;
-                        }
+                        Poll::Pending => return Poll::Pending,
                     }
                 }
             }
@@ -103,9 +94,16 @@ impl FrameDecoderState {
 impl<T: AsyncRead + Unpin> Future for FrameDecoder<T> {
     type Output = Result<(T, WsFrame), FrameDecodeError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Self { transport, state } = self.get_mut();
-        state.poll(transport, cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut transport = self.transport.take().unwrap();
+        match self.state.poll(&mut transport, cx) {
+            Poll::Ready(Ok(frame)) => Poll::Ready(Ok((transport, frame))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                self.transport = Some(transport);
+                Poll::Pending
+            }
+        }
     }
 }
 
