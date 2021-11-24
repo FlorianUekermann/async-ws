@@ -1,6 +1,7 @@
 use crate::frame::decode::FrameDecodeError;
 use crate::frame::{FrameHead, FrameHeadParseError};
 use futures::prelude::*;
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -50,6 +51,11 @@ impl FrameHeadDecodeState {
             let buffer_len = self.buffer_len;
             let read_window = &mut self.buffer[buffer_len..min];
             match Pin::new(&mut *transport).poll_read(cx, read_window) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(FrameDecodeError::Io(
+                        io::ErrorKind::UnexpectedEof.into(),
+                    )))
+                }
                 Poll::Ready(Ok(n)) => self.buffer_len += n,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
                 Poll::Pending => return Poll::Pending,

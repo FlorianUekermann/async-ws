@@ -1,4 +1,4 @@
-use crate::frame::mask;
+use crate::frame::payload_mask;
 use futures::prelude::*;
 use std::convert::TryFrom;
 use std::io;
@@ -50,15 +50,15 @@ impl FramePayloadReaderState {
         if self.payload_len <= self.completion || buf.len() == 0 {
             return Poll::Ready(Ok(0));
         }
-        let max = match usize::try_from(self.payload_len - self.completion) {
-            Ok(remainder) => remainder.max(buf.len()),
+        let min = match usize::try_from(self.payload_len - self.completion) {
+            Ok(remainder) => remainder.min(buf.len()),
             Err(_) => buf.len(),
         };
-        match Pin::new(transport).poll_read(cx, &mut buf[0..max]) {
+        match Pin::new(transport).poll_read(cx, &mut buf[0..min]) {
             Poll::Ready(Ok(n)) => match n {
                 0 => Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof))),
                 n => {
-                    mask(self.mask, self.completion as usize, buf);
+                    payload_mask(self.mask, self.completion as usize, buf);
                     self.completion += n as u64;
                     Poll::Ready(Ok(n))
                 }

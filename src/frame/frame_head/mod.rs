@@ -87,6 +87,9 @@ impl FrameHead {
         if masked {
             mask.copy_from_slice(&buffer[2 + extra_payload_len_bytes..6 + extra_payload_len_bytes])
         }
+        if payload_len > opcode.frame_kind().max_payload_len() {
+            return Err(FrameHeadParseError::PayloadLengthTooLong);
+        }
         Ok(FrameHead {
             fin,
             opcode,
@@ -106,8 +109,8 @@ impl FrameHead {
     pub fn masked(&self) -> bool {
         self.mask != [0u8, 0u8, 0u8, 0u8]
     }
-    // Writes the frame header to `buffer` and returns the number of bytes written. Panics if
-    // `buffer` is too small. See [len_bytes()][`Self::len_bytes()`].
+    // Writes the frame head to `buffer`.
+    // Panics if `buffer` is too small (see [len_bytes()][`Self::len_bytes()`]).
     pub fn encode(&self, buffer: &mut [u8]) {
         buffer[0] = self.fin as u8 * 0x80;
         buffer[0] += match self.opcode {
@@ -148,4 +151,6 @@ pub enum FrameHeadParseError {
     RsvBit,
     #[error("invalid opcode")]
     InvalidOpcode(u8),
+    #[error("payload length too long")]
+    PayloadLengthTooLong,
 }
