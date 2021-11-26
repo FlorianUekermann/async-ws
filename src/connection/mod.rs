@@ -1,3 +1,6 @@
+mod close;
+
+use crate::connection::close::CloseState;
 use crate::frame::{
     FrameDecodeError, FrameDecoderState, FrameHead, FramePayloadReaderState, WsControlFrame,
     WsControlFrameKind, WsControlFramePayload, WsDataFrame, WsDataFrameKind, WsFrame, WsOpcode,
@@ -35,8 +38,8 @@ pub struct WsConnectionState {
     frame_decode: FrameDecoderState,
     frame_payload_reader: Option<FramePayloadReaderState>,
     frame_fin: bool,
-    closed: Option<WsControlFramePayload>,
-    error: Option<Option<WsConnectionError>>,
+    close_state: CloseState,
+    delayed_next_err: Option<WsConnectionError>,
     control_buffer: [u8; 132],
     control_sent: usize,
     control_queued: usize,
@@ -55,8 +58,8 @@ impl WsConnectionState {
             frame_decode: FrameDecoderState::new(),
             frame_payload_reader: None,
             frame_fin: true,
-            closed: None,
-            error: None,
+            close_state: CloseState::None,
+            delayed_next_err: None,
             control_buffer: [0u8; 132],
             control_sent: 0,
             control_queued: 0,
@@ -69,10 +72,18 @@ impl WsConnectionState {
         }
     }
     pub fn start_message(&mut self, kind: WsMessageKind) {
-        if let Some(frame_kind) = self.writing {
-            self.transition_to_sending(frame_kind, true)
+        if self.writing.is_some() {
+            self.transition_to_sending(true)
         }
         self.writing = Some(kind.frame_kind())
+    }
+    pub fn handle_control_frame(&mut self, frame: WsControlFrame) {
+        let WsControlFrame { kind, payload } = frame;
+        match kind {
+            WsControlFrameKind::Ping => self.queued_pong = Some(payload),
+            WsControlFrameKind::Pong => log::info!("pong"),
+            WsControlFrameKind::Close => self.close_state.receive(payload),
+        }
     }
     pub fn poll_read<T: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
@@ -90,8 +101,8 @@ impl WsConnectionState {
             if self.frame_payload_reader.is_none() && self.frame_fin {
                 return Poll::Ready(Ok(0));
             }
-            if self.error.is_some() {
-                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+            if !self.close_state.open_for_receiving() {
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
             }
             if buf.len() == 0 {
                 return Poll::Ready(Ok(filled));
@@ -108,7 +119,11 @@ impl WsConnectionState {
                         buf = &mut buf[n..];
                         filled += n
                     }
-                    Poll::Ready(Err(err)) => self.error = Some(Some(err.into())),
+                    Poll::Ready(Err(err)) => {
+                        let err = WsConnectionError::Io(err);
+                        self.delayed_next_err = Some(self.close_state.receive_err(err));
+                        return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                    }
                     Poll::Pending => match filled {
                         0 => return Poll::Pending,
                         _ => return Poll::Ready(Ok(filled)),
@@ -118,11 +133,7 @@ impl WsConnectionState {
                     Poll::Ready(Ok(frame)) => {
                         self.frame_decode = FrameDecoderState::new();
                         match frame {
-                            WsFrame::Control(WsControlFrame { kind, payload }) => match kind {
-                                WsControlFrameKind::Ping => self.queued_pong = Some(payload),
-                                WsControlFrameKind::Pong => log::info!("pong"),
-                                WsControlFrameKind::Close => self.closed = Some(payload),
-                            },
+                            WsFrame::Control(frame) => self.handle_control_frame(frame),
                             WsFrame::Data(WsDataFrame {
                                 kind,
                                 mask,
@@ -135,13 +146,18 @@ impl WsConnectionState {
                                     self.frame_fin = fin;
                                 }
                                 kind => {
-                                    self.error =
-                                        Some(Some(WsConnectionError::UnexpectedFrameKind(kind)))
+                                    let err = WsConnectionError::UnexpectedFrameKind(kind);
+                                    self.delayed_next_err = Some(self.close_state.receive_err(err));
+                                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
                                 }
                             },
                         }
                     }
-                    Poll::Ready(Err(err)) => self.error = Some(Some(err.into())),
+                    Poll::Ready(Err(err)) => {
+                        let err = WsConnectionError::FrameDecodeError(err);
+                        self.delayed_next_err = Some(self.close_state.receive_err(err));
+                        return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                    }
                     Poll::Pending => {}
                 },
             }
@@ -152,17 +168,20 @@ impl WsConnectionState {
         transport: &mut T,
         cx: &mut Context<'_>,
     ) -> Poll<Option<<WsConnection<T> as Stream>::Item>> {
+        if let Some(err) = self.delayed_next_err.take() {
+            return Poll::Ready(Some(Err(err)));
+        }
+        if !self.close_state.open_for_receiving() {
+            return Poll::Ready(None);
+        }
         loop {
             match self.poll_write_transport(transport, cx, false) {
                 Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(err)) => {
-                    self.error = Some(Some(err.into()));
-                    return Poll::Ready(None);
-                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
                 Poll::Pending => return Poll::Pending,
             }
-            if let Some(err) = &mut self.error {
-                return Poll::Ready(err.take().map(|err| Err(err)));
+            if !self.close_state.open_for_receiving() {
+                return Poll::Ready(None);
             }
             if self.frame_payload_reader.is_some() || !self.frame_fin {
                 return Poll::Pending;
@@ -171,11 +190,7 @@ impl WsConnectionState {
                 Poll::Ready(Ok(frame)) => {
                     self.frame_decode = FrameDecoderState::new();
                     match frame {
-                        WsFrame::Control(WsControlFrame { kind, payload }) => match kind {
-                            WsControlFrameKind::Ping => self.queued_pong = Some(payload),
-                            WsControlFrameKind::Pong => log::info!("pong"),
-                            WsControlFrameKind::Close => self.closed = Some(payload),
-                        },
+                        WsFrame::Control(frame) => self.handle_control_frame(frame),
                         WsFrame::Data(WsDataFrame {
                             kind,
                             mask,
@@ -189,23 +204,51 @@ impl WsConnectionState {
                                 return Poll::Ready(Some(Ok(kind)));
                             }
                             None => {
-                                self.error =
-                                    Some(Some(WsConnectionError::UnexpectedFrameKind(kind)))
+                                let err = WsConnectionError::UnexpectedFrameKind(kind);
+                                return Poll::Ready(Some(Err(self.close_state.receive_err(err))));
                             }
                         },
                     }
                 }
-                Poll::Ready(Err(err)) => self.error = Some(Some(err.into())),
+                Poll::Ready(Err(err)) => {
+                    let err = WsConnectionError::FrameDecodeError(err);
+                    return Poll::Ready(Some(Err(self.close_state.receive_err(err))));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
     }
+
+    fn transition_to_sending(&mut self, fin: bool) {
+        if !fin && self.data_queued == 8 {
+            return;
+        }
+        if let Some(frame_kind) = self.writing {
+            self.data_sending = true;
+            let head = FrameHead {
+                fin,
+                opcode: frame_kind.opcode(),
+                mask: self.gen_mask(),
+                payload_len: (self.data_queued - 8) as u64,
+            };
+            self.data_sent = 8 - head.len_bytes();
+            head.encode(&mut self.data_buffer[self.data_sent..]);
+            self.writing = match fin {
+                true => None,
+                false => Some(WsDataFrameKind::Continuation),
+            };
+        }
+    }
+
     fn poll_write_transport<T: AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
         force_flush: bool,
     ) -> Poll<io::Result<()>> {
+        if !self.close_state.open_for_sending() {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
         while self.data_sending {
             match Pin::new(&mut *transport)
                 .poll_write(cx, &self.data_buffer[self.data_sent..self.data_queued])
@@ -218,30 +261,46 @@ impl WsConnectionState {
                         self.data_sending = false;
                     }
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    self.delayed_next_err = self.close_state.write_err(err);
+                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
-        while self.control_sent < self.control_queued || self.queued_pong.is_some() {
+        while self.control_sent < self.control_queued
+            || self.queued_pong.is_some()
+            || self.close_state.queued()
+        {
             if self.control_sent == self.control_queued {
-                if let Some(payload) = self.queued_pong.take() {
-                    let head = FrameHead {
-                        fin: true,
-                        opcode: WsOpcode::Pong,
-                        mask: self.gen_mask(),
-                        payload_len: payload.len() as u64,
-                    };
+                let mut queued = match self.queued_pong.take() {
+                    None => None,
+                    Some(payload) => Some((WsOpcode::Pong, payload)),
+                };
+                if let Some(payload) = self.close_state.unqueue() {
+                    queued = Some((WsOpcode::Close, payload));
+                }
+                if let Some((opcode, payload)) = queued {
+                    self.control_queued = WsFrame::encode(
+                        FrameHead {
+                            fin: true,
+                            opcode,
+                            mask: self.gen_mask(),
+                            payload_len: payload.len() as u64,
+                        },
+                        payload.data(),
+                        &mut self.control_buffer,
+                    );
                     self.control_sent = 0;
-                    self.control_queued =
-                        WsFrame::encode(head, payload.data(), &mut self.control_buffer)
                 }
             }
-            match Pin::new(&mut *transport).poll_write(
-                cx,
-                &self.control_buffer[self.control_sent..self.control_queued],
-            ) {
+            let write_slice = &self.control_buffer[self.control_sent..self.control_queued];
+            match Pin::new(&mut *transport).poll_write(cx, write_slice) {
                 Poll::Ready(Ok(n)) => self.control_sent += n,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    self.delayed_next_err = self.close_state.write_err(err);
+                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -251,24 +310,27 @@ impl WsConnectionState {
                     self.control_sent = 0;
                     self.control_queued = 0;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    self.delayed_next_err = self.close_state.write_err(err);
+                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
         Poll::Ready(Ok(()))
     }
+
     fn poll_write<T: AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let frame_kind = match self.writing {
-            None => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-            Some(frame_kind) => frame_kind,
+        if self.writing.is_none() {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         };
         if !self.data_sending && self.data_queued == self.data_buffer.len() {
-            self.transition_to_sending(frame_kind, false);
+            self.transition_to_sending(false)
         }
         match self.poll_write_transport(transport, cx, false) {
             Poll::Ready(Ok(())) => {}
@@ -280,47 +342,29 @@ impl WsConnectionState {
         self.data_queued += n;
         Poll::Ready(Ok(n))
     }
+
     fn gen_mask(&self) -> [u8; 4] {
         match self.config.mask {
             true => thread_rng().next_u32().to_ne_bytes(),
             false => [0u8, 0u8, 0u8, 0u8],
         }
     }
-    fn transition_to_sending(&mut self, frame_kind: WsDataFrameKind, fin: bool) {
-        self.data_sending = true;
-        let head = FrameHead {
-            fin,
-            opcode: frame_kind.opcode(),
-            mask: self.gen_mask(),
-            payload_len: (self.data_queued - 8) as u64,
-        };
-        self.data_sent = 8 - head.len_bytes();
-        head.encode(&mut self.data_buffer[self.data_sent..]);
-        self.writing = match fin {
-            true => None,
-            false => Some(WsDataFrameKind::Continuation),
-        }
-    }
+
     fn poll_flush<T: AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        let frame_kind = match self.writing {
-            None => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-            Some(frame_kind) => frame_kind,
-        };
-        self.transition_to_sending(frame_kind, false);
+        self.transition_to_sending(false);
         self.poll_write_transport(transport, cx, true)
     }
+
     fn poll_close<T: AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Some(frame_kind) = self.writing {
-            self.transition_to_sending(frame_kind, true);
-        }
+        self.transition_to_sending(true);
         self.poll_write_transport(transport, cx, true)
     }
 }

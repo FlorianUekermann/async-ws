@@ -87,6 +87,11 @@ impl FrameHead {
         if masked {
             mask.copy_from_slice(&buffer[2 + extra_payload_len_bytes..6 + extra_payload_len_bytes])
         }
+        if let WsFrameKind::Control(_) = opcode.frame_kind() {
+            if !fin {
+                return Err(FrameHeadParseError::FragmentedControl);
+            }
+        }
         if payload_len > opcode.frame_kind().max_payload_len() {
             return Err(FrameHeadParseError::PayloadLengthTooLong);
         }
@@ -153,4 +158,6 @@ pub enum FrameHeadParseError {
     InvalidOpcode(u8),
     #[error("payload length too long")]
     PayloadLengthTooLong,
+    #[error("fragmented control message")]
+    FragmentedControl,
 }

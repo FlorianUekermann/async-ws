@@ -8,6 +8,9 @@ pub use frame_payload::*;
 
 use crate::message::WsMessageKind;
 use futures::prelude::*;
+use std::error::Error;
+use std::io::Cursor;
+use std::io::Write;
 
 #[derive(Copy, Clone, Debug)]
 pub enum WsFrame {
@@ -160,5 +163,16 @@ impl WsControlFramePayload {
     }
     pub(crate) fn len(&self) -> usize {
         self.len as usize
+    }
+}
+
+impl<E: Error> From<(u16, &E)> for WsControlFramePayload {
+    fn from(err: (u16, &E)) -> Self {
+        let mut buffer = [0u8; 125];
+        buffer[0..2].copy_from_slice(&err.0.to_be_bytes());
+        let mut cursor = Cursor::new(&mut buffer[2..]);
+        write!(cursor, "{}", err.1).ok();
+        let len = 2 + cursor.position() as u8;
+        WsControlFramePayload { len, buffer }
     }
 }

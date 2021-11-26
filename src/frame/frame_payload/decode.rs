@@ -20,7 +20,7 @@ impl<T: AsyncRead + Unpin> FramePayloadReader<T> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 pub struct FramePayloadReaderState {
     mask: [u8; 4],
     payload_len: u64,

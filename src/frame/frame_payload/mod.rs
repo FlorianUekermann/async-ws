@@ -7,8 +7,9 @@ pub use decode::*;
 pub fn payload_mask(mask: [u8; 4], mut offset: usize, buffer: &mut [u8]) {
     if mask != [0u8, 0u8, 0u8, 0u8] {
         for byte in buffer.iter_mut() {
-            *byte ^= mask[offset & 3];
-            offset = offset.wrapping_add(1);
+            offset = offset % 4;
+            *byte ^= mask[offset];
+            offset += 1;
         }
     }
 }
