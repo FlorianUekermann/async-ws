@@ -1,6 +1,6 @@
 use crate::frame::{
-    FrameHeadDecodeState, FrameHeadParseError, FramePayloadReaderState, WsControlFrame,
-    WsControlFramePayload, WsDataFrame, WsFrame, WsFrameKind,
+    CloseBodyError, FrameHeadDecodeState, FrameHeadParseError, FramePayloadReaderState,
+    WsControlFrame, WsControlFrameKind, WsControlFramePayload, WsDataFrame, WsFrame, WsFrameKind,
 };
 use futures::prelude::*;
 use std::pin::Pin;
@@ -75,9 +75,15 @@ impl FrameDecoderState {
                     Poll::Pending => return Poll::Pending,
                 },
                 FrameDecoderState::ControlPayload { frame, reader } => {
-                    match reader.poll_read(transport, cx, &mut frame.payload.buffer) {
+                    let off = frame.payload.len as usize;
+                    match reader.poll_read(transport, cx, &mut frame.payload.buffer[off..]) {
                         Poll::Ready(Ok(n)) => {
                             if n == 0 {
+                                if frame.kind == WsControlFrameKind::Close {
+                                    if let Err(err) = frame.payload.close_body() {
+                                        return Poll::Ready(Err(err.into()));
+                                    }
+                                }
                                 return Poll::Ready(Ok(WsFrame::Control(*frame)));
                             }
                             frame.payload.len += n as u8
@@ -113,4 +119,6 @@ pub enum FrameDecodeError {
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     ParseErr(#[from] FrameHeadParseError),
+    #[error("invalid close body: {0}")]
+    InvalidCloseBody(#[from] CloseBodyError),
 }

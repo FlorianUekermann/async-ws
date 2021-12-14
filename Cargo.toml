@@ -13,6 +13,7 @@ base64 = "0.13.0"
 log = "0.4.14"
 thiserror = "1.0.30"
 rand = "0.8.4"
+utf-8 = "0.7.6"
 
 [dev-dependencies]
 async-http-codec = { git = "https://github.com/FlorianUekermann/async-http-codec" }

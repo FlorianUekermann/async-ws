@@ -1,6 +1,8 @@
 mod close;
+mod utf8_validation;
 
 use crate::connection::close::CloseState;
+use crate::connection::utf8_validation::process_utf8;
 use crate::frame::{
     FrameDecodeError, FrameDecoderState, FrameHead, FramePayloadReaderState, WsControlFrame,
     WsControlFrameKind, WsControlFramePayload, WsDataFrame, WsDataFrameKind, WsFrame, WsOpcode,
@@ -12,6 +14,7 @@ use std::cmp::min;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use utf8::Incomplete;
 
 pub struct WsConfig {
     pub mask: bool,
@@ -43,6 +46,7 @@ pub struct WsConnectionState {
     control_buffer: [u8; 132],
     control_sent: usize,
     control_queued: usize,
+    utf8_validator: Option<Incomplete>,
     queued_pong: Option<WsControlFramePayload>,
     data_buffer: [u8; 1300],
     data_sending: bool,
@@ -63,6 +67,7 @@ impl WsConnectionState {
             control_buffer: [0u8; 132],
             control_sent: 0,
             control_queued: 0,
+            utf8_validator: None,
             queued_pong: None,
             data_buffer: [0u8; 1300],
             data_sending: false,
@@ -112,12 +117,26 @@ impl WsConnectionState {
                     Poll::Ready(Ok(0)) => {
                         self.frame_payload_reader = None;
                         if self.frame_fin {
+                            if let Some(validator) = self.utf8_validator.take() {
+                                if !validator.is_empty() {
+                                    let err = WsConnectionError::IncompleteUtf8;
+                                    self.delayed_next_err = Some(self.close_state.receive_err(err));
+                                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                                }
+                            }
                             return Poll::Ready(Ok(filled));
                         }
                     }
                     Poll::Ready(Ok(n)) => {
+                        if let Some(validator) = &mut self.utf8_validator {
+                            if !process_utf8(validator, &buf[..n]) {
+                                let err = WsConnectionError::InvalidUtf8;
+                                self.delayed_next_err = Some(self.close_state.receive_err(err));
+                                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                            }
+                        }
                         buf = &mut buf[n..];
-                        filled += n
+                        filled += n;
                     }
                     Poll::Ready(Err(err)) => {
                         let err = WsConnectionError::Io(err);
@@ -201,6 +220,10 @@ impl WsConnectionState {
                                 self.frame_payload_reader =
                                     Some(FramePayloadReaderState::new(mask, payload_len));
                                 self.frame_fin = fin;
+                                self.utf8_validator = match kind {
+                                    WsMessageKind::Binary => None,
+                                    WsMessageKind::Text => Some(Incomplete::empty()),
+                                };
                                 return Poll::Ready(Some(Ok(kind)));
                             }
                             None => {
@@ -429,6 +452,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsConnection<T> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum WsConnectionError {
+    #[error("invalid utf8 in text message")]
+    InvalidUtf8,
+    #[error("incomplete utf8 in text message")]
+    IncompleteUtf8,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]

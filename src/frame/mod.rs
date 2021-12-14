@@ -79,7 +79,7 @@ impl WsDataFrameKind {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WsControlFrameKind {
     Ping,
     Pong,
@@ -164,6 +164,33 @@ impl WsControlFramePayload {
     pub(crate) fn len(&self) -> usize {
         self.len as usize
     }
+    pub(crate) fn close_body(&self) -> Result<Option<(u16, &str)>, CloseBodyError> {
+        match self.len() {
+            0 => Ok(None),
+            1 => Err(CloseBodyError::BodyTooShort),
+            _ => {
+                let data = self.data();
+                let code = u16::from_be_bytes([data[0], data[1]]);
+                match code {
+                    0..=999 | 1004..=1006 | 1016..=2999 => Err(CloseBodyError::InvalidCode),
+                    code => match std::str::from_utf8(&data[2..]) {
+                        Ok(reason) => Ok(Some((code, reason))),
+                        Err(_) => Err(CloseBodyError::InvalidUtf8),
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum CloseBodyError {
+    #[error("close frame body is too short")]
+    BodyTooShort,
+    #[error("invalid utf8 in close body reason")]
+    InvalidUtf8,
+    #[error("invalid close frame body code")]
+    InvalidCode,
 }
 
 impl<E: Error> From<(u16, &E)> for WsControlFramePayload {
