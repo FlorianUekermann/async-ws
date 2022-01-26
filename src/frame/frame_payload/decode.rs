@@ -66,6 +66,9 @@ impl FramePayloadReaderState {
             p => p,
         }
     }
+    pub fn finished(&self) -> bool {
+        self.payload_len == self.completion
+    }
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for FramePayloadReader<T> {
