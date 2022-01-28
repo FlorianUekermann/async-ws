@@ -53,9 +53,21 @@ impl WsFrameKind {
             WsFrameKind::Data(_) => 1073741824,
         }
     }
+    pub fn opcode(self) -> WsOpcode {
+        match self {
+            WsFrameKind::Control(frame) => frame.opcode(),
+            WsFrameKind::Data(frame) => frame.opcode(),
+        }
+    }
+    pub fn is_control(self) -> bool {
+        match self {
+            WsFrameKind::Control(_) => true,
+            WsFrameKind::Data(_) => false,
+        }
+    }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WsDataFrameKind {
     Text,
     Binary,
@@ -76,6 +88,9 @@ impl WsDataFrameKind {
             WsDataFrameKind::Binary => Some(WsMessageKind::Binary),
             WsDataFrameKind::Continuation => None,
         }
+    }
+    pub fn frame_kind(self) -> WsFrameKind {
+        WsFrameKind::Data(self)
     }
 }
 

@@ -61,7 +61,7 @@ async fn handle_ws_upgrade(mut transport: TcpStream, request: Request<()>) -> an
     let mut ws = WsConnection::with_config(transport, WsConfig::server());
     while let Some(event) = ws.next().await {
         let message_kind = event?;
-        // ws.start_message(message_kind);
+        ws.start_message(message_kind);
         let mut payload = Vec::new();
         ws.read_to_end(&mut payload).await?;
         log::info!(
@@ -69,8 +69,8 @@ async fn handle_ws_upgrade(mut transport: TcpStream, request: Request<()>) -> an
             message_kind,
             payload.len()
         );
-        // ws.write_all(&payload).await?;
-        // ws.close().await?;
+        ws.write_all(&payload).await?;
+        ws.close().await?;
     }
     Ok(())
 }

@@ -1,10 +1,13 @@
-use crate::frame::{FrameDecoderState, FramePayloadReaderState, WsDataFrame, WsControlFramePayload, WsFrame, WsControlFrame, WsControlFrameKind};
-use utf8::Incomplete;
-use futures::{AsyncRead, AsyncWrite};
-use futures::task::{Context, Poll};
-use crate::connection::{WsConnectionError};
+use crate::connection::WsConnectionError;
+use crate::frame::{
+    FrameDecoderState, FramePayloadReaderState, WsControlFrame, WsControlFrameKind,
+    WsControlFramePayload, WsDataFrame, WsFrame,
+};
 use crate::message::WsMessageKind;
+use futures::task::{Context, Poll};
+use futures::{AsyncRead, AsyncWrite};
 use std::ops::Deref;
+use utf8::Incomplete;
 
 pub(super) enum DecodeState {
     WaitingForMessageStart {
@@ -36,7 +39,7 @@ pub(crate) enum DecodeEvent {
 impl DecodeState {
     pub(crate) fn new() -> Self {
         Self::WaitingForMessageStart {
-            frame_decoder: FrameDecoderState::new()
+            frame_decoder: FrameDecoderState::new(),
         }
     }
     pub fn poll<T: AsyncRead + AsyncWrite + Unpin>(
@@ -46,12 +49,13 @@ impl DecodeState {
         buf: &mut [u8],
     ) -> DecodeEvent {
         match self {
-            DecodeState::WaitingForMessageStart { frame_decoder } | DecodeState::WaitingForMessageContinuation { frame_decoder, .. } => {
+            DecodeState::WaitingForMessageStart { frame_decoder }
+            | DecodeState::WaitingForMessageContinuation { frame_decoder, .. } => {
                 match frame_decoder.poll(transport, cx) {
                     Poll::Ready(Ok(frame)) => match frame {
                         WsFrame::Control(frame) => self.process_control_frame(frame),
                         WsFrame::Data(frame) => self.process_data_frame_head(frame),
-                    }
+                    },
                     Poll::Pending => DecodeEvent::Pending,
                     Poll::Ready(Err(err)) => {
                         *self = Self::Failed;
@@ -59,32 +63,39 @@ impl DecodeState {
                     }
                 }
             }
-            DecodeState::ReadingDataFramePayload { payload_reader, fin, utf8_validator } => {
-                match payload_reader.poll_read(transport, cx, buf) {
-                    Poll::Ready(Ok(n)) => {
-                        let frame_finished = payload_reader.finished();
-                        if let Some(validator) = utf8_validator {
-                            if let Some(err) = Self::process_utf8(validator, &buf[0..n], *fin && frame_finished) {
-                                *self = Self::Failed;
-                                return DecodeEvent::Failure(err);
-                            }
+            DecodeState::ReadingDataFramePayload {
+                payload_reader,
+                fin,
+                utf8_validator,
+            } => match payload_reader.poll_read(transport, cx, buf) {
+                Poll::Ready(Ok(n)) => {
+                    let frame_finished = payload_reader.finished();
+                    if let Some(validator) = utf8_validator {
+                        if let Some(err) =
+                            Self::process_utf8(validator, &buf[0..n], *fin && frame_finished)
+                        {
+                            *self = Self::Failed;
+                            return DecodeEvent::Failure(err);
                         }
-                        if frame_finished {
-                            *self = match fin {
-                                true => Self::new(),
-                                false => Self::WaitingForMessageContinuation { frame_decoder: FrameDecoderState::new(), utf8_validator: *utf8_validator }
-                            }
+                    }
+                    if frame_finished {
+                        *self = match fin {
+                            true => Self::new(),
+                            false => Self::WaitingForMessageContinuation {
+                                frame_decoder: FrameDecoderState::new(),
+                                utf8_validator: *utf8_validator,
+                            },
                         }
-                        DecodeEvent::ReadProgress(n, frame_finished)
                     }
-                    Poll::Pending => DecodeEvent::Pending,
-                    Poll::Ready(Err(err)) => {
-                        *self = Self::Failed;
-                        DecodeEvent::Failure(WsConnectionError::Io(err))
-                    }
+                    DecodeEvent::ReadProgress(n, frame_finished)
                 }
-            }
-            _ => panic!("idk")
+                Poll::Pending => DecodeEvent::Pending,
+                Poll::Ready(Err(err)) => {
+                    *self = Self::Failed;
+                    DecodeEvent::Failure(WsConnectionError::Io(err))
+                }
+            },
+            _ => panic!("idk"),
         }
     }
 
@@ -117,9 +128,7 @@ impl DecodeState {
     }
     fn process_control_frame(&mut self, frame: WsControlFrame) -> DecodeEvent {
         match frame.kind {
-            WsControlFrameKind::Close => {
-                *self = DecodeState::Closed(frame.payload)
-            }
+            WsControlFrameKind::Close => *self = DecodeState::Closed(frame.payload),
             _ => {}
         }
         DecodeEvent::Control(frame)
