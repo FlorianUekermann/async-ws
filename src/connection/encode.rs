@@ -1,5 +1,4 @@
 use crate::connection::encode::EncodeState::Sending;
-use crate::connection::WsConnectionError;
 use crate::frame::{
     payload_mask, FrameHead, WsControlFrame, WsControlFramePayload, WsDataFrameKind, WsFrameKind,
 };
@@ -8,8 +7,6 @@ use futures::task::{Context, Poll};
 use futures::{io, AsyncRead, AsyncWrite};
 use rand::{thread_rng, RngCore};
 use std::pin::Pin;
-use std::thread::sleep;
-use std::time::Duration;
 
 const FRAME_BUFFER_PAYLOAD_OFFSET: usize = 8;
 
@@ -148,7 +145,7 @@ impl EncodeState {
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), WsConnectionError>> {
+    ) -> Option<io::Error> {
         loop {
             match self {
                 Sending {
@@ -162,20 +159,19 @@ impl EncodeState {
                         if queued_control.is_some() || frame_in_progress.full() || fin {
                             match frame_in_progress.poll_write(transport, cx, fin) {
                                 Poll::Ready(Ok(())) => {
-                                    dbg!(&frame_in_progress.sent, &frame_in_progress.filled);
                                     if frame_in_progress.sent == frame_in_progress.filled {
                                         *frame = None
                                     }
                                 }
                                 Poll::Ready(Err(err)) => {
                                     *self = Self::Failed;
-                                    return Poll::Ready(Err(WsConnectionError::Io(err)));
+                                    return Some(err);
                                 }
-                                Poll::Pending => return Poll::Pending,
+                                Poll::Pending => return None,
                             }
                         }
                     } else {
-                        return Poll::Ready(Ok(()));
+                        return None;
                     }
                 }
                 _ => panic!("idk"),

@@ -1,5 +1,6 @@
 mod decode;
 mod encode;
+mod reader;
 
 use crate::connection::decode::{DecodeEvent, DecodeState};
 use crate::connection::encode::EncodeState;
@@ -9,6 +10,8 @@ use futures::prelude::*;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::sync::{Mutex, Arc};
+use crate::connection::reader::WsMessageReader;
 
 pub struct WsConfig {
     pub mask: bool,
@@ -30,134 +33,88 @@ impl WsConfig {
     }
 }
 
-pub struct WsConnectionState {
+pub(crate) struct WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
     config: WsConfig,
+    transport: T,
+    pub(crate) reader_is_attached: bool,
     decode_state: DecodeState,
     encode_state: EncodeState,
-    tmp: bool,
-    // write_state: WsConnectionWriteState,
 }
 
-impl WsConnectionState {
-    fn with_config(config: WsConfig) -> Self {
+impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
+    fn with_config(transport: T, config: WsConfig) -> Self {
         Self {
-            tmp: false,
-            config: config,
+            config,
+            transport,
+            reader_is_attached: false,
             decode_state: DecodeState::new(),
             encode_state: EncodeState::new(),
         }
     }
+    pub(crate) fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<(usize, bool)>> {
+        loop {
+            if let Some(err) = self.encode_state.poll(&mut self.transport, cx) {
+                panic!("err: {:?}", err);
+            }
+            match self.decode_state.poll(&mut self.transport, cx, buf) {
+                Poll::Ready(Ok(event)) => match event {
+                    DecodeEvent::MessageStart(_) => unreachable!(),
+                    DecodeEvent::Control(frame) => drop(dbg!(("control frame:", frame))),
+                    DecodeEvent::ReadProgress(n, fin) => {
+                        self.reader_is_attached = false;
+                        return Poll::Ready(Ok((n, fin)));
+                    }
+                }
+                Poll::Ready(Err(err)) => panic!("err: {:?}", err),
+                Poll::Pending => return Poll::Pending
+            }
+        }
+    }
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<WsMessageKind, WsConnectionError>>> {
+        loop {
+            if let Some(err) = self.encode_state.poll(&mut self.transport, cx) {
+                panic!("err: {:?}", err);
+            }
+            if self.reader_is_attached {
+                return Poll::Pending;
+            }
+            match self.decode_state.poll(&mut self.transport, cx, &mut [0u8;1300]) {
+                Poll::Ready(Ok(event)) => match event {
+                    DecodeEvent::MessageStart(kind) => {
+                        self.reader_is_attached = true;
+                        return Poll::Ready(Some(Ok(kind)));
+                    }
+                    DecodeEvent::Control(frame) => drop(dbg!(("control frame:", frame))),
+                    DecodeEvent::ReadProgress(_, _) => {},
+                }
+                Poll::Ready(Err(err)) => panic!("err: {:?}", err),
+                Poll::Pending => return Poll::Pending
+            }
+        }
+    }
+    pub(crate) fn detach_reader(&mut self) {
+        self.reader_is_attached = false;
+    }
 }
 
 pub struct WsConnection<T: AsyncRead + AsyncWrite + Unpin> {
-    transport: T,
-    state: WsConnectionState,
+    inner: Arc<Mutex<WsConnectionInner<T>>>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsConnection<T> {
     pub fn start_message(&mut self, kind: WsMessageKind) {
-        dbg!();
-        if !self.state.encode_state.start_message(kind) {
-            panic!("adsfasdfa")
-        }
+        panic!("adsf")
     }
     pub fn with_config(transport: T, config: WsConfig) -> Self {
-        Self {
-            transport,
-            state: WsConnectionState::with_config(config),
-        }
-    }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsConnection<T> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        let Self {
-            transport, state, ..
-        } = self.get_mut();
-        if state.tmp {
-            return Poll::Ready(Ok(0));
-        }
-        loop {
-            match dbg!(state.decode_state.poll(transport, cx, buf)) {
-                DecodeEvent::MessageStart(_) => panic!("unexpected message"),
-                DecodeEvent::Control(_) => continue,
-                DecodeEvent::InternalProgress => continue,
-                DecodeEvent::ReadProgress(n, fin) => {
-                    state.tmp = fin;
-                    break Poll::Ready(Ok(n));
-                }
-                DecodeEvent::Failure(_) => {
-                    break Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
-                }
-                DecodeEvent::Pending => break Poll::Pending,
-            }
-        }
+        Self { inner: Arc::new(Mutex::new(WsConnectionInner::with_config(transport, config))) }
     }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Stream for WsConnection<T> {
-    type Item = Result<WsMessageKind, WsConnectionError>;
+    type Item = Result<WsMessageReader<T>, WsConnectionError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Self {
-            transport, state, ..
-        } = self.get_mut();
-        loop {
-            match dbg!(state.decode_state.poll(transport, cx, &mut [])) {
-                DecodeEvent::MessageStart(kind) => {
-                    state.tmp = false;
-                    break Poll::Ready(Some(Ok(kind)));
-                }
-                DecodeEvent::Control(_) => continue,
-                DecodeEvent::InternalProgress => continue,
-                DecodeEvent::ReadProgress(_, _) => panic!("unexpected read"),
-                DecodeEvent::Failure(err) => break Poll::Ready(Some(Err(err))),
-                DecodeEvent::Pending => break Poll::Pending,
-            }
-        }
-    }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsConnection<T> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let Self { transport, state } = self.get_mut();
-        match state.encode_state.poll(transport, cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => panic!("write err: {:?}", err),
-            Poll::Pending => return Poll::Pending,
-        }
-        dbg!(&state.encode_state);
-        return Poll::Ready(Ok(dbg!(state.encode_state.append_frame(
-            buf,
-            false,
-            state.config.mask
-        ))));
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        panic!("idk")
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let Self {
-            transport, state, ..
-        } = self.get_mut();
-        state
-            .encode_state
-            .append_frame(&[], true, state.config.mask);
-        match dbg!(state.encode_state.poll(transport, cx)) {
-            Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
-            Poll::Ready(Err(err)) => panic!(err),
-            Poll::Pending => return Poll::Pending,
-        }
+        self.inner.lock().unwrap().poll_next(cx).map(|o| o.map(|r| r.map(|kind| WsMessageReader::new(kind, &self.inner))))
     }
 }
 
