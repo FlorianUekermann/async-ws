@@ -61,16 +61,10 @@ async fn handle_ws_upgrade(mut transport: TcpStream, request: Request<()>) -> an
     let mut ws = WsConnection::with_config(transport, WsConfig::server());
     while let Some(event) = ws.next().await {
         let mut reader = event?;
-        // ws.start_message(message_kind);
-        let mut payload = Vec::new();
-        reader.read_to_end(&mut payload).await?;
-        log::info!(
-            "received {:?} message with {} bytes",
-            reader.kind(),
-            payload.len()
-        );
-        // ws.write_all(&payload).await?;
-        // ws.close().await?;
+        let mut writer = ws.send(reader.kind()).await?;
+        let n = futures::io::copy(&mut reader, &mut writer).await?;
+        log::info!("echoed {:?} message with {} bytes", reader.kind(), n);
+        writer.close().await?;
     }
     Ok(())
 }

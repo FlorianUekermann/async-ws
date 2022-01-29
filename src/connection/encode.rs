@@ -169,10 +169,10 @@ impl EncodeState {
                                 }
                                 Poll::Pending => return None,
                             }
+                            continue;
                         }
-                    } else {
-                        return None;
                     }
+                    return None;
                 }
                 _ => panic!("idk"),
             }
