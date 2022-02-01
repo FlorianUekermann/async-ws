@@ -4,14 +4,15 @@ mod reader;
 mod send;
 mod writer;
 
-use crate::connection::decode::{DecodeEvent, DecodeState};
+use crate::connection::decode::DecodeState;
 use crate::connection::encode::EncodeState;
 use crate::connection::reader::WsMessageReader;
 use crate::connection::send::WsSend;
-use crate::frame::{FrameDecodeError, WsDataFrameKind};
+use crate::frame::{FrameDecodeError, WsControlFrame, WsDataFrameKind};
 use crate::message::WsMessageKind;
 use futures::prelude::*;
 use std::io;
+use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -86,7 +87,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                     return match total {
                         0 => Poll::Pending,
                         n => Poll::Ready(Ok(n)),
-                    }
+                    };
                 }
                 n => total += n,
             }
@@ -96,22 +97,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         &mut self,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<io::Result<(usize, bool)>> {
+    ) -> Poll<io::Result<usize>> {
         loop {
             if let Some(err) = self.encode_state.poll(&mut self.transport, cx) {
                 panic!("err: {:?}", err);
             }
             match self.decode_state.poll(&mut self.transport, cx, buf) {
-                Poll::Ready(Ok(event)) => match event {
-                    DecodeEvent::MessageStart(_) => unreachable!(),
-                    DecodeEvent::Control(frame) => drop(dbg!(("control frame:", frame))),
-                    DecodeEvent::ReadProgress(n, fin) => {
+                ControlFlow::Continue(frame) => Self::handle_control_frame(frame),
+                ControlFlow::Break(Poll::Ready(n)) => return Poll::Ready(Ok(n)),
+                ControlFlow::Break(Poll::Pending) => {
+                    if self.decode_state.take_message_end() {
                         self.reader_is_attached = false;
-                        return Poll::Ready(Ok((n, fin)));
+                        return Poll::Ready(Ok(0));
                     }
-                },
-                Poll::Ready(Err(err)) => panic!("err: {:?}", err),
-                Poll::Pending => return Poll::Pending,
+                    return Poll::Pending;
+                }
             }
         }
     }
@@ -130,22 +130,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 .decode_state
                 .poll(&mut self.transport, cx, &mut [0u8; 1300])
             {
-                Poll::Ready(Ok(event)) => match event {
-                    DecodeEvent::MessageStart(kind) => {
+                ControlFlow::Continue(frame) => Self::handle_control_frame(frame),
+                ControlFlow::Break(Poll::Ready(_)) => {}
+                ControlFlow::Break(Poll::Pending) => {
+                    if let Some(kind) = self.decode_state.take_message_start() {
                         self.reader_is_attached = true;
                         return Poll::Ready(Some(Ok(kind)));
                     }
-                    DecodeEvent::Control(frame) => drop(dbg!(("control frame:", frame))),
-                    DecodeEvent::ReadProgress(_, _) => {}
-                },
-                Poll::Ready(Err(err)) => panic!("err: {:?}", err),
-                Poll::Pending => return Poll::Pending,
+                    if !self.decode_state.take_message_end() {
+                        return Poll::Pending;
+                    }
+                }
             }
         }
     }
     pub(crate) fn detach_reader(&mut self) {
         self.reader_is_attached = false;
     }
+    fn handle_control_frame(frame: WsControlFrame) {}
 }
 
 #[derive(Clone)]

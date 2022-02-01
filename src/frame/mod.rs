@@ -120,8 +120,8 @@ pub struct WsDataFrame {
 }
 
 impl WsDataFrame {
-    pub fn payload_reader<T: AsyncRead + Unpin>(&self, transport: T) -> FramePayloadReader<T> {
-        FramePayloadReaderState::new(self.mask, self.payload_len).restore(transport)
+    pub fn payload_reader(&self) -> FramePayloadReaderState {
+        FramePayloadReaderState::new(self.mask, self.payload_len)
     }
     pub fn kind(&self) -> WsDataFrameKind {
         self.kind

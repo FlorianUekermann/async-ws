@@ -29,16 +29,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
+        if buf.len() == 0 {
+            return Poll::Ready(Ok(0));
+        }
         let this = self.get_mut();
         if let Some(inner) = &this.inner {
-            let (n, fin) = match inner.lock().unwrap().poll_read(cx, buf) {
+            let n = match inner.lock().unwrap().poll_read(cx, buf) {
                 Poll::Ready(r) => match r {
                     Ok(r) => r,
                     Err(err) => return Poll::Ready(Err(err)),
                 },
                 Poll::Pending => return Poll::Pending,
             };
-            if fin {
+            if n == 0 {
                 this.inner.take();
             }
             return Poll::Ready(Ok(n));

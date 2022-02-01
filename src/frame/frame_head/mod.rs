@@ -2,9 +2,7 @@ mod decode;
 
 pub use decode::*;
 
-use crate::frame::{
-    FramePayloadReader, FramePayloadReaderState, WsControlFrameKind, WsDataFrameKind, WsFrameKind,
-};
+use crate::frame::{WsControlFrameKind, WsDataFrameKind, WsFrameKind};
 use futures::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -41,9 +39,6 @@ pub struct FrameHead {
 impl FrameHead {
     pub fn decode<T: AsyncRead + Unpin>(transport: T) -> FrameHeadDecode<T> {
         FrameHeadDecodeState::new().restore(transport)
-    }
-    pub fn payload_reader<T: AsyncRead + Unpin>(self, transport: T) -> FramePayloadReader<T> {
-        FramePayloadReaderState::new(self.mask, self.payload_len).restore(transport)
     }
     pub fn parse(buffer: &[u8]) -> Result<FrameHead, FrameHeadParseError> {
         if buffer.len() < 2 {
