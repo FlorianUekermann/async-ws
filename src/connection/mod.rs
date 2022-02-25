@@ -6,12 +6,12 @@ mod waker;
 mod writer;
 
 use crate::connection::decode::DecodeState;
-use crate::connection::encode::{EncodeState, EncodeStateReady};
+use crate::connection::encode::{EncodeReady, EncodeState};
 pub use crate::connection::reader::WsMessageReader;
 pub use crate::connection::send::WsSend;
 use crate::connection::waker::new_waker;
 pub use crate::connection::writer::WsMessageWriter;
-use crate::frame::{FrameDecodeError, WsControlFrame, WsDataFrameKind};
+use crate::frame::{FrameDecodeError, WsControlFrame, WsControlFrameKind, WsDataFrameKind};
 use crate::message::WsMessageKind;
 use futures::prelude::*;
 use futures::task::Waker;
@@ -20,6 +20,10 @@ use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+
+fn broken_pipe<T>() -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+}
 
 pub struct WsConfig {
     pub mask: bool,
@@ -76,13 +80,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             .encode_state
             .poll(&mut self.transport, cx, self.config.mask)
         {
-            Poll::Ready(Ok(EncodeStateReady::FlushedMessages)) => {
+            Poll::Ready(EncodeReady::FlushedMessages) => {
                 self.encode_state.start_message(kind);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
-            Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrames))
-            | Poll::Pending => Poll::Pending,
+            Poll::Ready(EncodeReady::Error | EncodeReady::Done) => todo!(),
+            Poll::Ready(EncodeReady::Buffering | EncodeReady::FlushedFrames) | Poll::Pending => {
+                Poll::Pending
+            }
         }
     }
     pub(crate) fn poll_write(
@@ -96,12 +101,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 .encode_state
                 .poll(&mut self.transport, cx, self.config.mask)
             {
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(EncodeReady::Error | EncodeReady::Done) => return broken_pipe(),
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(EncodeStateReady::FlushedMessages)) => {
-                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
-                }
-                Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrames)) => {}
+                Poll::Ready(EncodeReady::FlushedMessages) => return broken_pipe(),
+                Poll::Ready(EncodeReady::Buffering | EncodeReady::FlushedFrames) => {}
             }
             total += self
                 .encode_state
@@ -115,27 +118,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 .encode_state
                 .poll(&mut self.transport, cx, self.config.mask)
             {
-                Poll::Ready(Ok(
-                    EncodeStateReady::FlushedFrames | EncodeStateReady::FlushedMessages,
-                )) => return Poll::Ready(Ok(())),
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(EncodeReady::FlushedFrames | EncodeReady::FlushedMessages) => {
+                    return Poll::Ready(Ok(()))
+                }
+                Poll::Ready(EncodeReady::Error | EncodeReady::Done) => return broken_pipe(),
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(EncodeStateReady::Buffering)) => self.encode_state.start_flushing(),
+                Poll::Ready(EncodeReady::Buffering) => self.encode_state.start_flushing(),
             }
         }
     }
     pub(crate) fn poll_close_writer(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         loop {
-            match dbg!(self
+            match self
                 .encode_state
-                .poll(&mut self.transport, cx, self.config.mask))
+                .poll(&mut self.transport, cx, self.config.mask)
             {
-                Poll::Ready(Ok(EncodeStateReady::FlushedMessages)) => {
-                    return Pin::new(&mut self.transport).poll_flush(cx)
+                Poll::Ready(EncodeReady::FlushedMessages) => {
+                    return Pin::new(&mut self.transport).poll_flush(cx);
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(EncodeReady::Error | EncodeReady::Done) => return broken_pipe(),
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrames)) => {
+                Poll::Ready(EncodeReady::Buffering | EncodeReady::FlushedFrames) => {
                     self.encode_state.end_message(self.config.mask)
                 }
             }
@@ -147,14 +150,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         loop {
-            if let Poll::Ready(Err(err)) =
-                self.encode_state
-                    .poll(&mut self.transport, cx, self.config.mask)
-            {
-                panic!("err: {:?}", err);
-            }
+            let _ = self
+                .encode_state
+                .poll(&mut self.transport, cx, self.config.mask);
+            // TODO: take error
             match self.decode_state.poll(&mut self.transport, cx, buf) {
-                ControlFlow::Continue(frame) => Self::handle_control_frame(frame),
+                ControlFlow::Continue(frame) => self.handle_control_frame(frame),
                 ControlFlow::Break(Poll::Ready(n)) => return Poll::Ready(Ok(n)),
                 ControlFlow::Break(Poll::Pending) => {
                     if self.decode_state.take_message_end() {
@@ -170,14 +171,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<WsMessageKind, WsConnectionError>>> {
-        dbg!();
         loop {
-            if let Poll::Ready(Err(err)) =
-                self.encode_state
-                    .poll(&mut self.transport, cx, self.config.mask)
-            {
-                panic!("err: {:?}", err);
-            }
+            let _ = self
+                .encode_state
+                .poll(&mut self.transport, cx, self.config.mask);
             if self.reader_is_attached {
                 return Poll::Pending;
             }
@@ -185,7 +182,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 .decode_state
                 .poll(&mut self.transport, cx, &mut [0u8; 1300])
             {
-                ControlFlow::Continue(frame) => Self::handle_control_frame(frame),
+                ControlFlow::Continue(frame) => self.handle_control_frame(frame),
                 ControlFlow::Break(Poll::Ready(_)) => {}
                 ControlFlow::Break(Poll::Pending) => {
                     if let Some(kind) = self.decode_state.take_message_start() {
@@ -209,7 +206,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         self.writer_waker.take();
         self.send_waker.take().map(Waker::wake);
     }
-    fn handle_control_frame(frame: WsControlFrame) {}
+    fn handle_control_frame(&mut self, mut frame: WsControlFrame) {
+        match frame.kind() {
+            WsControlFrameKind::Ping => frame.kind = WsControlFrameKind::Pong,
+            WsControlFrameKind::Pong => return,
+            WsControlFrameKind::Close => {}
+        }
+        self.encode_state.queue_control(frame)
+    }
 }
 
 #[derive(Clone)]
@@ -234,7 +238,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for WsConnection<T> {
     type Item = Result<WsMessageReader<T>, WsConnectionError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        dbg!();
         let waker = new_waker(Arc::downgrade(&self.inner));
         let mut inner = self.inner.lock().unwrap();
         inner.stream_waker = Some(cx.waker().clone());

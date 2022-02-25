@@ -27,7 +27,6 @@ pub(crate) fn new_waker<T: AsyncRead + AsyncWrite + Unpin>(
     }
 
     unsafe fn wake_by_ref<T: AsyncRead + AsyncWrite + Unpin>(raw: *const ()) {
-        dbg!();
         let weak = ManuallyDrop::new(Weak::from_raw(raw as *const Mutex<WsConnectionInner<T>>));
         if let Some(strong) = weak.upgrade() {
             let mut inner = strong.lock().unwrap();

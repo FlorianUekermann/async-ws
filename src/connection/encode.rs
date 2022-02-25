@@ -1,14 +1,12 @@
 use crate::connection::encode::EncodeState::Sending;
 use crate::frame::{
-    payload_mask, FrameHead, WsControlFrame, WsControlFramePayload, WsDataFrameKind, WsFrameKind,
+    payload_mask, FrameHead, WsControlFrame, WsControlFrameKind, WsDataFrameKind, WsFrameKind,
 };
 use crate::message::WsMessageKind;
 use futures::task::{Context, Poll};
 use futures::{io, AsyncRead, AsyncWrite};
 use rand::{thread_rng, RngCore};
 use std::pin::Pin;
-
-const FRAME_BUFFER_PAYLOAD_OFFSET: usize = 8;
 
 #[derive(Debug)]
 pub(crate) enum EncodeState {
@@ -18,8 +16,150 @@ pub(crate) enum EncodeState {
         queued_control: Option<WsControlFrame>,
         flushed: Option<bool>,
     },
-    Closed(WsControlFramePayload),
-    Failed,
+    Err(io::Error),
+    Done,
+}
+
+#[derive(Debug)]
+pub(crate) enum EncodeReady {
+    Buffering,
+    FlushedMessages,
+    FlushedFrames,
+    Error,
+    Done,
+}
+
+impl EncodeState {
+    pub fn new() -> EncodeState {
+        EncodeState::Sending {
+            frame_in_progress: None,
+            next_data_frame_kind: None,
+            queued_control: None,
+            flushed: Some(false),
+        }
+    }
+    pub fn start_message(&mut self, kind: WsMessageKind) {
+        if let Sending {
+            next_data_frame_kind,
+            frame_in_progress: None,
+            flushed,
+            ..
+        } = self
+        {
+            assert!(next_data_frame_kind.is_none());
+            flushed.take();
+            *next_data_frame_kind = Some(kind.frame_kind());
+        } else {
+            unreachable!()
+        }
+    }
+    pub fn end_message(&mut self, mask: bool) {
+        if let Sending {
+            next_data_frame_kind,
+            frame_in_progress,
+            ..
+        } = self
+        {
+            if let Some(kind) = next_data_frame_kind.take() {
+                if let Some(frame) = frame_in_progress {
+                    frame.start_writing(true);
+                } else {
+                    let mut frame = FrameInProgress::new(kind.frame_kind(), mask);
+                    frame.start_writing(true);
+                    *frame_in_progress = Some(frame);
+                }
+                self.start_flushing()
+            }
+        }
+    }
+    pub fn queue_control(&mut self, control: WsControlFrame) {
+        if let Sending { queued_control, .. } = self {
+            if let Some(queued) = queued_control {
+                if queued.kind() == WsControlFrameKind::Close {
+                    return;
+                }
+            }
+            *queued_control = Some(control);
+        }
+    }
+    pub fn append_data(&mut self, buf: &[u8], mask: bool) -> usize {
+        if let Sending {
+            next_data_frame_kind,
+            frame_in_progress,
+            flushed,
+            ..
+        } = self
+        {
+            let kind = next_data_frame_kind
+                .replace(WsDataFrameKind::Continuation)
+                .unwrap();
+            flushed.take();
+            frame_in_progress
+                .get_or_insert_with(|| FrameInProgress::new(kind.frame_kind(), mask))
+                .append_data(buf)
+        } else {
+            unreachable!()
+        }
+    }
+    pub fn start_flushing(&mut self) {
+        if let Sending { flushed, .. } = self {
+            flushed.get_or_insert(false);
+        } else {
+            unreachable!()
+        }
+    }
+    pub fn poll<T: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        transport: &mut T,
+        cx: &mut Context<'_>,
+        mask: bool,
+    ) -> Poll<EncodeReady> {
+        loop {
+            match self {
+                Self::Sending {
+                    frame_in_progress,
+                    next_data_frame_kind,
+                    queued_control,
+                    flushed,
+                } => {
+                    if let Some(frame) = frame_in_progress {
+                        match frame.poll(transport, cx) {
+                            Poll::Ready(FrameInProgressReady::Buffering) => {
+                                if flushed.is_none() {
+                                    return Poll::Ready(EncodeReady::Buffering);
+                                }
+                                frame.start_writing(false);
+                            }
+                            Poll::Ready(FrameInProgressReady::Written) => *frame_in_progress = None,
+                            Poll::Ready(FrameInProgressReady::Err(err)) => *self = Self::Err(err),
+                            Poll::Pending => return Poll::Pending,
+                        }
+                    } else if let Some(control) = queued_control.take() {
+                        *frame_in_progress = Some(FrameInProgress::new_control(control, mask));
+                        self.start_flushing();
+                    } else {
+                        match flushed {
+                            None => match next_data_frame_kind {
+                                Some(_) => return Poll::Ready(EncodeReady::Buffering),
+                                None => unreachable!(),
+                            },
+                            Some(true) => match next_data_frame_kind {
+                                Some(_) => return Poll::Ready(EncodeReady::FlushedFrames),
+                                None => return Poll::Ready(EncodeReady::FlushedMessages),
+                            },
+                            Some(false) => match Pin::new(&mut *transport).poll_flush(cx) {
+                                Poll::Ready(Ok(())) => *flushed = Some(true),
+                                Poll::Ready(Err(err)) => *self = Self::Err(err),
+                                Poll::Pending => return Poll::Pending,
+                            },
+                        }
+                    }
+                }
+                Self::Err(_) => return Poll::Ready(EncodeReady::Error),
+                Self::Done => return Poll::Ready(EncodeReady::Done),
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -35,7 +175,10 @@ pub struct FrameInProgress {
 enum FrameInProgressReady {
     Buffering,
     Written,
+    Err(io::Error),
 }
+
+const FRAME_BUFFER_PAYLOAD_OFFSET: usize = 8;
 
 impl FrameInProgress {
     fn new(kind: WsFrameKind, mask: bool) -> Self {
@@ -85,9 +228,9 @@ impl FrameInProgress {
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
-    ) -> Poll<io::Result<FrameInProgressReady>> {
+    ) -> Poll<FrameInProgressReady> {
         let mut offset = match self.written {
-            None => return Poll::Ready(Ok(FrameInProgressReady::Buffering)),
+            None => return Poll::Ready(FrameInProgressReady::Buffering),
             Some(offset) => offset,
         };
         loop {
@@ -96,148 +239,11 @@ impl FrameInProgress {
                     offset += n;
                     self.written = Some(offset);
                     if offset == self.filled {
-                        return Poll::Ready(Ok(FrameInProgressReady::Written));
+                        return Poll::Ready(FrameInProgressReady::Written);
                     }
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => return Poll::Ready(FrameInProgressReady::Err(err)),
                 Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum EncodeStateReady {
-    Buffering,
-    FlushedMessages,
-    FlushedFrames,
-}
-
-impl EncodeState {
-    pub fn new() -> EncodeState {
-        EncodeState::Sending {
-            frame_in_progress: None,
-            next_data_frame_kind: None,
-            queued_control: None,
-            flushed: Some(false),
-        }
-    }
-    pub fn start_message(&mut self, kind: WsMessageKind) {
-        if let Sending {
-            next_data_frame_kind,
-            frame_in_progress: None,
-            flushed,
-            ..
-        } = self
-        {
-            assert!(next_data_frame_kind.is_none());
-            flushed.take();
-            *next_data_frame_kind = Some(kind.frame_kind());
-        } else {
-            unreachable!()
-        }
-    }
-    pub fn end_message(&mut self, mask: bool) {
-        if let Sending {
-            next_data_frame_kind,
-            frame_in_progress,
-            ..
-        } = self
-        {
-            if let Some(kind) = next_data_frame_kind.take() {
-                if let Some(frame) = frame_in_progress {
-                    frame.start_writing(true);
-                } else {
-                    let mut frame = FrameInProgress::new(kind.frame_kind(), mask);
-                    frame.start_writing(true);
-                    *frame_in_progress = Some(frame);
-                }
-                self.start_flushing()
-            }
-        }
-    }
-    pub fn append_data(&mut self, buf: &[u8], mask: bool) -> usize {
-        if let Sending {
-            next_data_frame_kind,
-            frame_in_progress,
-            flushed,
-            ..
-        } = self
-        {
-            let kind = next_data_frame_kind
-                .replace(WsDataFrameKind::Continuation)
-                .unwrap();
-            flushed.take();
-            frame_in_progress
-                .get_or_insert_with(|| FrameInProgress::new(kind.frame_kind(), mask))
-                .append_data(buf)
-        } else {
-            unreachable!()
-        }
-    }
-    pub fn start_flushing(&mut self) {
-        if let Sending { flushed, .. } = self {
-            flushed.get_or_insert(false);
-        } else {
-            unreachable!()
-        }
-    }
-    pub fn poll<T: AsyncRead + AsyncWrite + Unpin>(
-        &mut self,
-        transport: &mut T,
-        cx: &mut Context<'_>,
-        mask: bool,
-    ) -> Poll<io::Result<EncodeStateReady>> {
-        loop {
-            match self {
-                Sending {
-                    frame_in_progress,
-                    next_data_frame_kind,
-                    queued_control,
-                    flushed,
-                } => {
-                    if let Some(frame) = frame_in_progress {
-                        match frame.poll(transport, cx) {
-                            Poll::Ready(Ok(FrameInProgressReady::Buffering)) => {
-                                if flushed.is_none() {
-                                    return Poll::Ready(Ok(EncodeStateReady::Buffering));
-                                }
-                                frame.start_writing(false);
-                            }
-                            Poll::Ready(Ok(FrameInProgressReady::Written)) => {
-                                *frame_in_progress = None
-                            }
-                            Poll::Ready(Err(err)) => {
-                                *self = Self::Failed;
-                                return Poll::Ready(Err(err));
-                            }
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    } else if let Some(control) = queued_control.take() {
-                        *frame_in_progress = Some(FrameInProgress::new_control(control, mask));
-                        self.start_flushing();
-                    } else {
-                        match flushed {
-                            None => match next_data_frame_kind {
-                                Some(_) => return Poll::Ready(Ok(EncodeStateReady::Buffering)),
-                                None => unreachable!(),
-                            },
-                            Some(true) => match next_data_frame_kind {
-                                Some(_) => return Poll::Ready(Ok(EncodeStateReady::FlushedFrames)),
-                                None => return Poll::Ready(Ok(EncodeStateReady::FlushedMessages)),
-                            },
-                            Some(false) => match Pin::new(&mut *transport).poll_flush(cx) {
-                                Poll::Ready(Ok(())) => *flushed = Some(true),
-                                Poll::Ready(Err(err)) => {
-                                    *self = Self::Failed;
-                                    return Poll::Ready(Err(err));
-                                }
-                                Poll::Pending => return Poll::Pending,
-                            },
-                        }
-                    }
-                }
-                _ => panic!("idk"),
             }
         }
     }
