@@ -1,3 +1,4 @@
+use crate::connection::waker::new_waker;
 use crate::connection::WsConnectionInner;
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite};
@@ -5,7 +6,6 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use crate::connection::waker::new_waker;
 
 pub struct WsMessageWriter<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
@@ -36,7 +36,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsMessageWriter<T> {
                 let mut inner = inner.lock().unwrap();
                 inner.writer_waker = Some(cx.waker().clone());
                 inner.poll_write(&mut Context::from_waker(&waker), buf)
-            },
+            }
             None => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
         }
     }
@@ -48,7 +48,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsMessageWriter<T> {
                 let mut inner = inner.lock().unwrap();
                 inner.writer_waker = Some(cx.waker().clone());
                 inner.poll_flush(&mut Context::from_waker(&waker))
-            },
+            }
             None => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
         }
     }
@@ -66,7 +66,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsMessageWriter<T> {
                     self.inner.take();
                 }
                 p
-            },
+            }
             None => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
         }
     }

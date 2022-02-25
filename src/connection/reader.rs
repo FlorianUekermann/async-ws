@@ -1,3 +1,4 @@
+use crate::connection::waker::new_waker;
 use crate::connection::WsConnectionInner;
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite};
@@ -5,7 +6,6 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use crate::connection::waker::new_waker;
 
 pub struct WsMessageReader<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
@@ -45,8 +45,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
                 },
                 Poll::Pending => return Poll::Pending,
             };
-            drop(inner);
             if n == 0 {
+                inner.detach_reader();
+                drop(inner);
                 this.inner.take();
             }
             return Poll::Ready(Ok(n));

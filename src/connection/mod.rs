@@ -2,23 +2,24 @@ mod decode;
 mod encode;
 mod reader;
 mod send;
-mod writer;
 mod waker;
+mod writer;
 
 use crate::connection::decode::DecodeState;
 use crate::connection::encode::{EncodeState, EncodeStateReady};
 pub use crate::connection::reader::WsMessageReader;
 pub use crate::connection::send::WsSend;
+use crate::connection::waker::new_waker;
+pub use crate::connection::writer::WsMessageWriter;
 use crate::frame::{FrameDecodeError, WsControlFrame, WsDataFrameKind};
 use crate::message::WsMessageKind;
 use futures::prelude::*;
+use futures::task::Waker;
 use std::io;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use futures::task::{Waker};
-use crate::connection::waker::{new_waker};
 
 pub struct WsConfig {
     pub mask: bool,
@@ -44,7 +45,6 @@ pub(crate) struct WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
     config: WsConfig,
     transport: T,
     pub(crate) reader_is_attached: bool,
-    pub(crate) writer_is_attached: bool,
     decode_state: DecodeState,
     encode_state: EncodeState,
     stream_waker: Option<Waker>,
@@ -59,7 +59,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             config,
             transport,
             reader_is_attached: false,
-            writer_is_attached: false,
             decode_state: DecodeState::new(),
             encode_state: EncodeState::new(),
             stream_waker: None,
@@ -73,13 +72,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         kind: WsMessageKind,
         cx: &mut Context,
     ) -> Poll<Result<(), WsConnectionError>> {
-        match self.encode_state.poll(&mut self.transport, cx, self.config.mask) {
-            Poll::Ready(Ok(EncodeStateReady::FlushedMessage)) => {
-                    self.encode_state.start_message(kind);
-                    Poll::Ready(Ok(()))
-            },
+        match self
+            .encode_state
+            .poll(&mut self.transport, cx, self.config.mask)
+        {
+            Poll::Ready(Ok(EncodeStateReady::FlushedMessages)) => {
+                self.encode_state.start_message(kind);
+                Poll::Ready(Ok(()))
+            }
             Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
-            Poll::Ready(Ok(EncodeStateReady::FlushedFrame | EncodeStateReady::Buffering)) | Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrames))
+            | Poll::Pending => Poll::Pending,
         }
     }
     pub(crate) fn poll_write(
@@ -89,39 +92,52 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
     ) -> Poll<io::Result<usize>> {
         let mut total = 0usize;
         while total != buf.len() {
-            match self.encode_state.poll(&mut self.transport, cx, self.config.mask) {
+            match self
+                .encode_state
+                .poll(&mut self.transport, cx, self.config.mask)
+            {
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(EncodeStateReady::FlushedMessage)) => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-                Poll::Ready(Ok(EncodeStateReady::FlushedFrame | EncodeStateReady::Buffering)) => {}
+                Poll::Ready(Ok(EncodeStateReady::FlushedMessages)) => {
+                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+                }
+                Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrames)) => {}
             }
-            total += self.encode_state.append_data(&buf[total..], self.config.mask)
+            total += self
+                .encode_state
+                .append_data(&buf[total..], self.config.mask)
         }
         Poll::Ready(Ok(total))
     }
-    pub(crate) fn poll_flush(
-        &mut self,
-        cx: &mut Context<'_>
-    ) -> Poll<io::Result<()>> {
+    pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         loop {
-            match self.encode_state.poll(&mut self.transport, cx, self.config.mask) {
-                Poll::Ready(Ok(EncodeStateReady::FlushedFrame | EncodeStateReady::FlushedMessage)) => return Pin::new(&mut self.transport).poll_flush(cx),
+            match self
+                .encode_state
+                .poll(&mut self.transport, cx, self.config.mask)
+            {
+                Poll::Ready(Ok(
+                    EncodeStateReady::FlushedFrames | EncodeStateReady::FlushedMessages,
+                )) => return Poll::Ready(Ok(())),
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(EncodeStateReady::Buffering)) => self.encode_state.start_flushing(),
             }
         }
     }
-    pub(crate) fn poll_close_writer(
-        &mut self,
-        cx: &mut Context<'_>
-    ) -> Poll<io::Result<()>> {
+    pub(crate) fn poll_close_writer(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         loop {
-            match dbg!(self.encode_state.poll(&mut self.transport, cx, self.config.mask)) {
-                Poll::Ready(Ok(EncodeStateReady::FlushedMessage)) => return Pin::new(&mut self.transport).poll_flush(cx),
+            match dbg!(self
+                .encode_state
+                .poll(&mut self.transport, cx, self.config.mask))
+            {
+                Poll::Ready(Ok(EncodeStateReady::FlushedMessages)) => {
+                    return Pin::new(&mut self.transport).poll_flush(cx)
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrame)) => self.encode_state.end_message(self.config.mask),
+                Poll::Ready(Ok(EncodeStateReady::Buffering | EncodeStateReady::FlushedFrames)) => {
+                    self.encode_state.end_message(self.config.mask)
+                }
             }
         }
     }
@@ -131,7 +147,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         loop {
-            if let Poll::Ready(Err(err)) = self.encode_state.poll(&mut self.transport, cx, self.config.mask) {
+            if let Poll::Ready(Err(err)) =
+                self.encode_state
+                    .poll(&mut self.transport, cx, self.config.mask)
+            {
                 panic!("err: {:?}", err);
             }
             match self.decode_state.poll(&mut self.transport, cx, buf) {
@@ -153,7 +172,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
     ) -> Poll<Option<Result<WsMessageKind, WsConnectionError>>> {
         dbg!();
         loop {
-            if let Poll::Ready(Err(err)) = self.encode_state.poll(&mut self.transport, cx, self.config.mask) {
+            if let Poll::Ready(Err(err)) =
+                self.encode_state
+                    .poll(&mut self.transport, cx, self.config.mask)
+            {
                 panic!("err: {:?}", err);
             }
             if self.reader_is_attached {
@@ -180,14 +202,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
     pub(crate) fn detach_reader(&mut self) {
         self.reader_is_attached = false;
         self.reader_waker.take();
+        self.stream_waker.take().map(Waker::wake);
     }
     pub(crate) fn detach_writer(&mut self) {
+        self.encode_state.end_message(true);
         self.writer_waker.take();
-        self.encode_state.end_message(true)
+        self.send_waker.take().map(Waker::wake);
     }
     fn handle_control_frame(frame: WsControlFrame) {}
 }
-
 
 #[derive(Clone)]
 pub struct WsConnection<T: AsyncRead + AsyncWrite + Unpin> {
@@ -211,10 +234,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for WsConnection<T> {
     type Item = Result<WsMessageReader<T>, WsConnectionError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        dbg!();
         let waker = new_waker(Arc::downgrade(&self.inner));
         let mut inner = self.inner.lock().unwrap();
         inner.stream_waker = Some(cx.waker().clone());
-        inner.poll_next_reader(&mut Context::from_waker(&waker))
+        inner
+            .poll_next_reader(&mut Context::from_waker(&waker))
             .map(|o| o.map(|r| r.map(|kind| WsMessageReader::new(kind, &self.inner))))
     }
 }

@@ -4,7 +4,7 @@ use async_ws::connection::{WsConfig, WsConnection, WsMessageReader};
 use async_ws::http::{is_upgrade_request, upgrade_response};
 use futures::executor::{LocalPool, LocalSpawner};
 use futures::prelude::*;
-use futures::task::LocalSpawnExt;
+use futures::task::{LocalSpawnExt, SpawnExt};
 use http::{HeaderValue, Request, Response};
 use log::LevelFilter;
 use simple_logger::SimpleLogger;
@@ -54,7 +54,11 @@ async fn serve_html(mut transport: TcpStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn ws_handler(mut transport: TcpStream, request: Request<()>, spawner: LocalSpawner) -> anyhow::Result<()> {
+async fn ws_handler(
+    mut transport: TcpStream,
+    request: Request<()>,
+    spawner: LocalSpawner,
+) -> anyhow::Result<()> {
     let response = upgrade_response(&request).unwrap();
     ResponseHeadEncoder::default()
         .encode(&mut transport, response)
@@ -64,16 +68,21 @@ async fn ws_handler(mut transport: TcpStream, request: Request<()>, spawner: Loc
         let ws = ws.clone();
         let reader = event?;
         log::info!("new {:?} message", reader.kind());
-        spawner.spawn_local(async {
-            if let Err(err) = msg_handler(ws, reader).await {
-                log::error!("message handler error: {:?}", err);
-            };
-        }).unwrap()
+        spawner
+            .spawn(async {
+                if let Err(err) = msg_handler(ws, reader).await {
+                    log::error!("message handler error: {:?}", err);
+                };
+            })
+            .unwrap()
     }
     Ok(())
 }
 
-async fn msg_handler(ws: WsConnection<TcpStream>, mut reader: WsMessageReader<TcpStream>) -> anyhow::Result<()> {
+async fn msg_handler(
+    ws: WsConnection<TcpStream>,
+    mut reader: WsMessageReader<TcpStream>,
+) -> anyhow::Result<()> {
     let mut writer = ws.send(reader.kind()).await?;
     let n = futures::io::copy(&mut reader, &mut writer).await?;
     writer.close().await?;
