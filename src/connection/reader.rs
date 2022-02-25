@@ -5,6 +5,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use crate::connection::waker::new_waker;
 
 pub struct WsMessageReader<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
@@ -34,13 +35,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
         }
         let this = self.get_mut();
         if let Some(inner) = &this.inner {
-            let n = match inner.lock().unwrap().poll_read(cx, buf) {
+            let waker = new_waker(Arc::downgrade(inner));
+            let mut inner = inner.lock().unwrap();
+            inner.reader_waker = Some(cx.waker().clone());
+            let n = match inner.poll_read(&mut Context::from_waker(&waker), buf) {
                 Poll::Ready(r) => match r {
                     Ok(r) => r,
                     Err(err) => return Poll::Ready(Err(err)),
                 },
                 Poll::Pending => return Poll::Pending,
             };
+            drop(inner);
             if n == 0 {
                 this.inner.take();
             }

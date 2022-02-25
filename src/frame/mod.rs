@@ -109,6 +109,9 @@ impl WsControlFrameKind {
             WsControlFrameKind::Close => WsOpcode::Close,
         }
     }
+    pub fn frame_kind(self) -> WsFrameKind {
+        WsFrameKind::Control(self)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
