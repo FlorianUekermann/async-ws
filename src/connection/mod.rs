@@ -51,6 +51,7 @@ pub(crate) struct WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
     pub(crate) reader_is_attached: bool,
     decode_state: DecodeState,
     encode_state: EncodeState,
+    error: Option<Option<WsConnectionError>>,
     stream_waker: Option<Waker>,
     send_waker: Option<Waker>,
     writer_waker: Option<Waker>,
@@ -65,6 +66,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             reader_is_attached: false,
             decode_state: DecodeState::new(),
             encode_state: EncodeState::new(),
+            error: None,
             stream_waker: None,
             send_waker: None,
             writer_waker: None,
@@ -153,7 +155,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             let _ = self
                 .encode_state
                 .poll(&mut self.transport, cx, self.config.mask);
-            // TODO: take error
             match self.decode_state.poll(&mut self.transport, cx, buf) {
                 ControlFlow::Continue(frame) => self.handle_control_frame(frame),
                 ControlFlow::Break(Poll::Ready(n)) => return Poll::Ready(Ok(n)),

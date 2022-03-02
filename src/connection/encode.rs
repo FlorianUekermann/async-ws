@@ -6,6 +6,7 @@ use crate::message::WsMessageKind;
 use futures::task::{Context, Poll};
 use futures::{io, AsyncRead, AsyncWrite};
 use rand::{thread_rng, RngCore};
+use std::mem::replace;
 use std::pin::Pin;
 
 #[derive(Debug)]
@@ -15,6 +16,7 @@ pub(crate) enum EncodeState {
         next_data_frame_kind: Option<WsDataFrameKind>,
         queued_control: Option<WsControlFrame>,
         flushed: Option<bool>,
+        closing: bool,
     },
     Err(io::Error),
     Done,
@@ -36,6 +38,7 @@ impl EncodeState {
             next_data_frame_kind: None,
             queued_control: None,
             flushed: Some(false),
+            closing: false,
         }
     }
     pub fn start_message(&mut self, kind: WsMessageKind) {
@@ -108,6 +111,16 @@ impl EncodeState {
             unreachable!()
         }
     }
+    pub fn take_err(&mut self) -> Option<io::Error> {
+        if let EncodeState::Err(_) = self {
+            let old = replace(self, EncodeState::Done);
+            match old {
+                EncodeState::Err(err) => return Some(err),
+                _ => unreachable!(),
+            }
+        }
+        None
+    }
     pub fn poll<T: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
@@ -121,6 +134,7 @@ impl EncodeState {
                     next_data_frame_kind,
                     queued_control,
                     flushed,
+                    closing,
                 } => {
                     if let Some(frame) = frame_in_progress {
                         match frame.poll(transport, cx) {
@@ -135,19 +149,22 @@ impl EncodeState {
                             Poll::Pending => return Poll::Pending,
                         }
                     } else if let Some(control) = queued_control.take() {
+                        *closing |= control.kind() == WsControlFrameKind::Close;
                         *frame_in_progress = Some(FrameInProgress::new_control(control, mask));
                         self.start_flushing();
                     } else {
-                        match flushed {
-                            None => match next_data_frame_kind {
+                        match (*flushed, closing) {
+                            (None, false) => match next_data_frame_kind {
                                 Some(_) => return Poll::Ready(EncodeReady::Buffering),
-                                None => unreachable!(),
+                                None => unreachable!("should always flush after message fin"),
                             },
-                            Some(true) => match next_data_frame_kind {
+                            (None, true) => unreachable!("should always flush after close frame"),
+                            (Some(true), true) => *self = Self::Done,
+                            (Some(true), false) => match next_data_frame_kind {
                                 Some(_) => return Poll::Ready(EncodeReady::FlushedFrames),
                                 None => return Poll::Ready(EncodeReady::FlushedMessages),
                             },
-                            Some(false) => match Pin::new(&mut *transport).poll_flush(cx) {
+                            (Some(false), _) => match Pin::new(&mut *transport).poll_flush(cx) {
                                 Poll::Ready(Ok(())) => *flushed = Some(true),
                                 Poll::Ready(Err(err)) => *self = Self::Err(err),
                                 Poll::Pending => return Poll::Pending,
