@@ -114,17 +114,21 @@ impl DecodeState {
             DecodeState::MessageEnd { .. } => Poll::Ready(DecodeReady::MessageEnd),
         }
     }
-    fn poll_read<T: AsyncRead + AsyncWrite + Unpin>(
+    pub(crate) fn poll_read<T: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<usize> {
         match self {
             DecodeState::ReadingDataFramePayload { payload, fin, utf8 } => {
                 let n = match payload.poll_read(transport, cx, buf) {
                     Poll::Ready(Ok(n)) => n,
-                    p => return p,
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Err(err)) => {
+                        self.set_err(err.into());
+                        return Poll::Ready(0);
+                    }
                 };
                 let frame_finished = payload.finished();
                 if let Err(err) = Self::validate_utf8(utf8, &buf[0..n], *fin && frame_finished) {
@@ -139,9 +143,9 @@ impl DecodeState {
                         },
                     };
                 }
-                Poll::Ready(Ok(n))
+                Poll::Ready(n)
             }
-            _ => Poll::Ready(Ok(0)),
+            _ => Poll::Ready(0),
         }
     }
     pub fn set_err(&mut self, err: WsConnectionError) {
