@@ -8,6 +8,7 @@ use futures::task::{Context, Poll};
 use futures::{AsyncRead, AsyncWrite};
 use std::ops::ControlFlow;
 use utf8::Incomplete;
+use std::io;
 
 pub(super) enum DecodeState {
     WaitingForMessageStart {
@@ -29,15 +30,22 @@ pub(super) enum DecodeState {
         utf8: Option<Incomplete>,
     },
     MessageEnd,
-    Closed(WsControlFramePayload),
-    Failed(WsConnectionError),
+    Control {
+        frame: WsControlFrame,
+        continue_message: Option<Option<Incomplete>>,
+    },
+    Err(WsConnectionError),
+    Done,
 }
 
-enum Event {
-    Control(WsControlFrame),
-    Read(usize),
-    Err(WsConnectionError),
-    Blocked,
+#[derive(Copy, Clone)]
+pub(crate) enum DecodeReady {
+    Control(WsControlFrameKind),
+    MessageStart,
+    MessageData,
+    MessageEnd,
+    Error,
+    Done,
 }
 
 impl DecodeState {
@@ -46,40 +54,18 @@ impl DecodeState {
             frame_decoder: FrameDecoderState::new(),
         }
     }
-    // Returns Break(Pending) if progress is blocked by transport or the decoder is stuck in a state
-    // which requires a transition that isn't always appropriate, such as consuming a message start.
-    // Returns Break(Ready) if data has been written to the buffer.
-    // Returns Continue(frame) if a control frame has been received.
-    pub fn poll<T: AsyncRead + AsyncWrite + Unpin>(
+    pub(crate) fn poll<T: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         transport: &mut T,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> ControlFlow<Poll<usize>, WsControlFrame> {
-        loop {
-            if let ControlFlow::Break(event) = self.poll_loop_body(transport, cx, buf) {
-                break match event {
-                    Event::Control(frame) => ControlFlow::Continue(frame),
-                    Event::Read(n) => ControlFlow::Break(Poll::Ready(n)),
-                    Event::Err(err) => {
-                        *self = Self::Failed(err);
-                        ControlFlow::Break(Poll::Pending)
-                    }
-                    Event::Blocked => ControlFlow::Break(Poll::Pending),
-                };
-            }
-        }
-    }
-    fn poll_loop_body<T: AsyncRead + AsyncWrite + Unpin>(
-        &mut self,
-        transport: &mut T,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> ControlFlow<Event> {
+    ) -> Poll<DecodeReady> {
         match self {
             DecodeState::WaitingForMessageStart { frame_decoder } => {
                 match Self::ready_ok_or_break(frame_decoder.poll(transport, cx))? {
-                    WsFrame::Control(frame) => self.process_control_frame(frame),
+                    WsFrame::Control(frame) => {
+                        *self = Self::Control { frame, continue_message: None };
+                        Poll::Ready(DecodeReady::Control(frame.kind()))
+                    }
                     WsFrame::Data(frame) => match frame.kind.message_kind() {
                         Some(kind) => {
                             *self = Self::MessageStart {
@@ -90,35 +76,60 @@ impl DecodeState {
                             };
                             ControlFlow::Continue(())
                         }
-                        None => ControlFlow::Break(Event::Err(
-                            WsConnectionError::UnexpectedFrameKind(frame.kind.into()),
-                        )),
+                        None => {
+                            self.set_err(frame.kind().into());
+                            Poll::Ready(DecodeReady::Error)
+                        },
                     },
                 }
             }
             DecodeState::WaitingForMessageContinuation {
                 frame_decoder,
-                utf8: utf8_validator,
+                utf8,
             } => match Self::ready_ok_or_break(frame_decoder.poll(transport, cx))? {
-                WsFrame::Control(frame) => self.process_control_frame(frame),
+                WsFrame::Control(frame) => {
+                    *self = Self::Control { frame, continue_message: Some(*utf8) };
+                    Poll::Ready(DecodeReady::Control(frame.kind()))
+                }
                 WsFrame::Data(frame) => match frame.kind.message_kind() {
                     None => {
                         *self = Self::ReadingDataFramePayload {
                             payload: frame.payload_reader(),
                             fin: frame.fin,
-                            utf8: *utf8_validator,
+                            utf8: *utf8,
                         };
-                        ControlFlow::Continue(())
+                        Poll::Ready(DecodeReady::MessageData)
                     }
-                    Some(_) => ControlFlow::Break(Event::Err(
-                        WsConnectionError::UnexpectedFrameKind(frame.kind.into()),
-                    )),
+                    Some(_) => {
+                        self.set_err(frame.kind.into());
+                        Poll::Ready(DecodeReady::Error)
+                    },
                 },
             },
+            DecodeState::ReadingDataFramePayload { .. } => Poll::Ready(DecodeReady::MessageData),
+            DecodeState::Err(_) => Poll::Ready(DecodeReady::Error),
+            DecodeState::Done => Poll::Ready(DecodeReady::Done),
+            DecodeState::Control { frame, .. } => Poll::Ready(DecodeReady::Control(frame.kind())),
+            DecodeState::MessageStart { .. } => Poll::Ready(DecodeReady::MessageStart),
+            DecodeState::MessageEnd { .. } => Poll::Ready(DecodeReady::MessageEnd),
+        }
+    }
+    fn poll_read<T: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        transport: &mut T,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        match self {
             DecodeState::ReadingDataFramePayload { payload, fin, utf8 } => {
-                let n = Self::ready_ok_or_break(payload.poll_read(transport, cx, buf))?;
+                let n = match payload.poll_read(transport, cx, buf) {
+                    Poll::Ready(Ok(n)) => n,
+                    p => return p,
+                };
                 let frame_finished = payload.finished();
-                Self::validate_utf8(utf8, &buf[0..n], *fin && frame_finished)?;
+                if let Err(err) = Self::validate_utf8(utf8, &buf[0..n], *fin && frame_finished) {
+                    self.set_err(err)
+                }
                 if frame_finished {
                     *self = match fin {
                         true => Self::MessageEnd,
@@ -128,48 +139,30 @@ impl DecodeState {
                         },
                     };
                 }
-                match n {
-                    0 => ControlFlow::Break(Event::Blocked),
-                    _ => ControlFlow::Break(Event::Read(n)),
-                }
+                Poll::Ready(Ok(n))
             }
-            _ => ControlFlow::Break(Event::Blocked),
+            _ => Poll::Ready(Ok(0)),
         }
     }
-
-    fn ready_ok_or_break<T, E: Into<WsConnectionError>>(
-        p: Poll<Result<T, E>>,
-    ) -> ControlFlow<Event, T> {
-        match p {
-            Poll::Ready(r) => match r {
-                Ok(ok) => ControlFlow::Continue(ok),
-                Err(err) => ControlFlow::Break(Event::Err(err.into())),
-            },
-            Poll::Pending => ControlFlow::Break(Event::Blocked),
-        }
-    }
-    fn process_control_frame(&mut self, frame: WsControlFrame) -> ControlFlow<Event> {
-        if frame.kind == WsControlFrameKind::Close {
-            *self = DecodeState::Closed(frame.payload);
-        }
-        ControlFlow::Break(Event::Control(frame))
+    pub fn set_err(&mut self, err: WsConnectionError) {
+        *self = Self::Err(err)
     }
     fn validate_utf8(
         state: &mut Option<Incomplete>,
         input: &[u8],
         fin: bool,
-    ) -> ControlFlow<Event> {
+    ) -> Result<(), WsConnectionError> {
         if let Some(state) = state {
             for byte in input {
                 if let Some((Err(_), _)) = state.try_complete(std::slice::from_ref(byte)) {
-                    return ControlFlow::Break(Event::Err(WsConnectionError::InvalidUtf8));
+                    return Err(WsConnectionError::InvalidUtf8);
                 }
             }
             if fin && !state.is_empty() {
-                return ControlFlow::Break(Event::Err(WsConnectionError::IncompleteUtf8));
+                return Err(WsConnectionError::IncompleteUtf8);
             }
         }
-        ControlFlow::Continue(())
+        Ok(())
     }
     pub fn take_message_start(&mut self) -> Option<WsMessageKind> {
         if let Self::MessageStart {
@@ -192,17 +185,29 @@ impl DecodeState {
         }
         None
     }
-    pub fn at_message_end(&self) -> bool {
+    pub fn take_message_end(&mut self) -> bool {
         match self {
-            Self::MessageEnd => true,
+            Self::MessageEnd => {
+                *self = Self::new();
+                true
+            }
             _ => false,
         }
     }
-    pub fn take_message_end(&mut self) -> bool {
-        if self.at_message_end() {
-            *self = Self::new();
-            return true;
+    pub fn take_control(&mut self) -> Option<WsControlFrame> {
+        match self {
+            Self::Control{frame, continue_message} => {
+                let frame = *frame;
+                *self = match continue_message {
+                    Some(utf8) => Self::WaitingForMessageContinuation{
+                        frame_decoder: FrameDecoderState::new(),
+                        utf8: *utf8
+                    },
+                    None => Self::WaitingForMessageStart { frame_decoder: FrameDecoderState::new() }
+                };
+                Some(frame)
+            }
+            _ => None,
         }
-        false
     }
 }

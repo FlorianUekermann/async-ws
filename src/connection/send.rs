@@ -23,14 +23,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsSend<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Future for WsSend<T> {
-    type Output = Result<WsMessageWriter<T>, WsConnectionError>;
+    type Output = Option<WsMessageWriter<T>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let waker = new_waker(Arc::downgrade(&self.inner));
         let mut inner = self.inner.lock().unwrap();
         inner.send_waker = Some(cx.waker().clone());
-        inner
-            .poll_next_writer(self.kind, &mut Context::from_waker(&waker))
-            .map(|r| r.map(|()| WsMessageWriter::new(self.kind, &self.inner)))
+        match inner.poll_next_writer(self.kind, &mut Context::from_waker(&waker)) {
+            Poll::Ready(true) => Poll::Ready(Some(WsMessageWriter::new(self.kind, &self.inner))),
+            Poll::Ready(false) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending
+        }
     }
 }

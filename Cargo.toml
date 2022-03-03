@@ -15,6 +15,7 @@ thiserror = "1.0.30"
 rand = "0.8.4"
 utf-8 = "0.7.6"
 generic_static = "0.2.0"
+async-io = "1.6.0"
 
 [dev-dependencies]
 async-http-codec = { git = "https://github.com/FlorianUekermann/async-http-codec" }
