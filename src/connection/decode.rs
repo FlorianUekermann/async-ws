@@ -1,14 +1,13 @@
 use crate::connection::WsConnectionError;
 use crate::frame::{
-    FrameDecoderState, FramePayloadReaderState, WsControlFrame, WsControlFrameKind,
-    WsFrame,
+    FrameDecoderState, FramePayloadReaderState, WsControlFrame, WsControlFrameKind, WsFrame,
 };
 use crate::message::WsMessageKind;
 use futures::task::{Context, Poll};
 use futures::{AsyncRead, AsyncWrite};
 
+use std::mem::replace;
 use utf8::Incomplete;
-
 
 pub(super) enum DecodeState {
     WaitingForMessageStart {
@@ -63,7 +62,10 @@ impl DecodeState {
             DecodeState::WaitingForMessageStart { frame_decoder } => {
                 match frame_decoder.poll(transport, cx) {
                     Poll::Ready(Ok(WsFrame::Control(frame))) => {
-                        *self = Self::Control { frame, continue_message: None };
+                        *self = Self::Control {
+                            frame,
+                            continue_message: None,
+                        };
                         Poll::Ready(DecodeReady::Control(frame.kind()))
                     }
                     Poll::Ready(Ok(WsFrame::Data(frame))) => match frame.kind.message_kind() {
@@ -79,13 +81,13 @@ impl DecodeState {
                         None => {
                             self.set_err(frame.kind().into());
                             Poll::Ready(DecodeReady::Error)
-                        },
+                        }
                     },
                     Poll::Ready(Err(err)) => {
                         self.set_err(err.into());
                         Poll::Ready(DecodeReady::Error)
                     }
-                    Poll::Pending => Poll::Pending
+                    Poll::Pending => Poll::Pending,
                 }
             }
             DecodeState::WaitingForMessageContinuation {
@@ -93,7 +95,10 @@ impl DecodeState {
                 utf8,
             } => match frame_decoder.poll(transport, cx) {
                 Poll::Ready(Ok(WsFrame::Control(frame))) => {
-                    *self = Self::Control { frame, continue_message: Some(*utf8) };
+                    *self = Self::Control {
+                        frame,
+                        continue_message: Some(*utf8),
+                    };
                     Poll::Ready(DecodeReady::Control(frame.kind()))
                 }
                 Poll::Ready(Ok(WsFrame::Data(frame))) => match frame.kind.message_kind() {
@@ -108,13 +113,13 @@ impl DecodeState {
                     Some(_) => {
                         self.set_err(frame.kind.into());
                         Poll::Ready(DecodeReady::Error)
-                    },
+                    }
                 },
                 Poll::Ready(Err(err)) => {
                     self.set_err(err.into());
                     Poll::Ready(DecodeReady::Error)
                 }
-                Poll::Pending => Poll::Pending
+                Poll::Pending => Poll::Pending,
             },
             DecodeState::ReadingDataFramePayload { .. } => Poll::Ready(DecodeReady::MessageData),
             DecodeState::Err(_) => Poll::Ready(DecodeReady::Error),
@@ -160,6 +165,15 @@ impl DecodeState {
     }
     pub fn set_err(&mut self, err: WsConnectionError) {
         *self = Self::Err(err)
+    }
+    pub fn take_err(&mut self) -> Option<WsConnectionError> {
+        if let Self::Err(err) = self {
+            if let Self::Err(err) = replace(self, Self::Done) {
+                return Some(err);
+            }
+            unreachable!()
+        }
+        None
     }
     fn validate_utf8(
         state: &mut Option<Incomplete>,
@@ -210,14 +224,19 @@ impl DecodeState {
     }
     pub fn take_control(&mut self) -> Option<WsControlFrame> {
         match self {
-            Self::Control{frame, continue_message} => {
+            Self::Control {
+                frame,
+                continue_message,
+            } => {
                 let frame = *frame;
                 *self = match continue_message {
-                    Some(utf8) => Self::WaitingForMessageContinuation{
+                    Some(utf8) => Self::WaitingForMessageContinuation {
                         frame_decoder: FrameDecoderState::new(),
-                        utf8: *utf8
+                        utf8: *utf8,
                     },
-                    None => Self::WaitingForMessageStart { frame_decoder: FrameDecoderState::new() }
+                    None => Self::WaitingForMessageStart {
+                        frame_decoder: FrameDecoderState::new(),
+                    },
                 };
                 Some(frame)
             }

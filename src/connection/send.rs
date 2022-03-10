@@ -1,21 +1,24 @@
 use crate::connection::waker::{new_waker, Wakers};
 use crate::connection::writer::WsMessageWriter;
-use crate::connection::{ WsConnectionInner};
+use crate::connection::WsConnectionInner;
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite, Future};
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::ops::DerefMut;
 
 #[derive(Clone)]
 pub struct WsSend<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
-    parent: Arc<Mutex<(WsConnectionInner<T>,Wakers)>>,
+    parent: Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsSend<T> {
-    pub(crate) fn new(parent: &Arc<Mutex<(WsConnectionInner<T>, Wakers)>>, kind: WsMessageKind) -> Self {
+    pub(crate) fn new(
+        parent: &Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
+        kind: WsMessageKind,
+    ) -> Self {
         Self {
             kind,
             parent: parent.clone(),
@@ -34,7 +37,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Future for WsSend<T> {
         match inner.poll_next_writer(self.kind, &mut Context::from_waker(&waker)) {
             Poll::Ready(true) => Poll::Ready(Some(WsMessageWriter::new(self.kind, &self.parent))),
             Poll::Ready(false) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending
+            Poll::Pending => Poll::Pending,
         }
     }
 }

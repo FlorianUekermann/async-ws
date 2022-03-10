@@ -3,10 +3,10 @@ use crate::connection::WsConnectionInner;
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite};
 use std::io;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::ops::DerefMut;
 
 pub struct WsMessageReader<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
@@ -14,7 +14,10 @@ pub struct WsMessageReader<T: AsyncRead + AsyncWrite + Unpin> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsMessageReader<T> {
-    pub(crate) fn new(kind: WsMessageKind, parent: &Arc<Mutex<(WsConnectionInner<T>, Wakers)>>) -> Self {
+    pub(crate) fn new(
+        kind: WsMessageKind,
+        parent: &Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
+    ) -> Self {
         Self {
             kind,
             parent: Some(parent.clone()),
