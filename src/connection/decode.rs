@@ -1,14 +1,14 @@
 use crate::connection::WsConnectionError;
 use crate::frame::{
     FrameDecoderState, FramePayloadReaderState, WsControlFrame, WsControlFrameKind,
-    WsControlFramePayload, WsFrame,
+    WsFrame,
 };
 use crate::message::WsMessageKind;
 use futures::task::{Context, Poll};
 use futures::{AsyncRead, AsyncWrite};
-use std::ops::ControlFlow;
+
 use utf8::Incomplete;
-use std::io;
+
 
 pub(super) enum DecodeState {
     WaitingForMessageStart {
@@ -38,7 +38,7 @@ pub(super) enum DecodeState {
     Done,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum DecodeReady {
     Control(WsControlFrameKind),
     MessageStart,
@@ -61,12 +61,12 @@ impl DecodeState {
     ) -> Poll<DecodeReady> {
         match self {
             DecodeState::WaitingForMessageStart { frame_decoder } => {
-                match Self::ready_ok_or_break(frame_decoder.poll(transport, cx))? {
-                    WsFrame::Control(frame) => {
+                match frame_decoder.poll(transport, cx) {
+                    Poll::Ready(Ok(WsFrame::Control(frame))) => {
                         *self = Self::Control { frame, continue_message: None };
                         Poll::Ready(DecodeReady::Control(frame.kind()))
                     }
-                    WsFrame::Data(frame) => match frame.kind.message_kind() {
+                    Poll::Ready(Ok(WsFrame::Data(frame))) => match frame.kind.message_kind() {
                         Some(kind) => {
                             *self = Self::MessageStart {
                                 kind,
@@ -74,24 +74,29 @@ impl DecodeState {
                                 fin: frame.fin,
                                 first_frame_payload_len: frame.payload_len,
                             };
-                            ControlFlow::Continue(())
+                            Poll::Ready(DecodeReady::MessageStart)
                         }
                         None => {
                             self.set_err(frame.kind().into());
                             Poll::Ready(DecodeReady::Error)
                         },
                     },
+                    Poll::Ready(Err(err)) => {
+                        self.set_err(err.into());
+                        Poll::Ready(DecodeReady::Error)
+                    }
+                    Poll::Pending => Poll::Pending
                 }
             }
             DecodeState::WaitingForMessageContinuation {
                 frame_decoder,
                 utf8,
-            } => match Self::ready_ok_or_break(frame_decoder.poll(transport, cx))? {
-                WsFrame::Control(frame) => {
+            } => match frame_decoder.poll(transport, cx) {
+                Poll::Ready(Ok(WsFrame::Control(frame))) => {
                     *self = Self::Control { frame, continue_message: Some(*utf8) };
                     Poll::Ready(DecodeReady::Control(frame.kind()))
                 }
-                WsFrame::Data(frame) => match frame.kind.message_kind() {
+                Poll::Ready(Ok(WsFrame::Data(frame))) => match frame.kind.message_kind() {
                     None => {
                         *self = Self::ReadingDataFramePayload {
                             payload: frame.payload_reader(),
@@ -105,6 +110,11 @@ impl DecodeState {
                         Poll::Ready(DecodeReady::Error)
                     },
                 },
+                Poll::Ready(Err(err)) => {
+                    self.set_err(err.into());
+                    Poll::Ready(DecodeReady::Error)
+                }
+                Poll::Pending => Poll::Pending
             },
             DecodeState::ReadingDataFramePayload { .. } => Poll::Ready(DecodeReady::MessageData),
             DecodeState::Err(_) => Poll::Ready(DecodeReady::Error),
@@ -124,7 +134,7 @@ impl DecodeState {
             DecodeState::ReadingDataFramePayload { payload, fin, utf8 } => {
                 let n = match payload.poll_read(transport, cx, buf) {
                     Poll::Ready(Ok(n)) => n,
-                    Poll::Pending => Poll::Pending,
+                    Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(err)) => {
                         self.set_err(err.into());
                         return Poll::Ready(0);

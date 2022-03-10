@@ -4,6 +4,7 @@ mod reader;
 mod send;
 mod waker;
 mod writer;
+mod open;
 
 use crate::connection::decode::{DecodeState, DecodeReady};
 use crate::connection::encode::{EncodeReady, EncodeState};
@@ -17,14 +18,17 @@ use crate::frame::{
 use crate::message::WsMessageKind;
 use futures::prelude::*;
 use futures::task::Waker;
+use futures_lite::StreamExt;
 use std::io;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use async_io::Timer;
-use std::time::{Instant, Duration};
-use std::io::Error;
+use std::time::{Duration};
+use std::mem::replace;
+use crate::connection::open::OpenReady;
+
 
 fn broken_pipe<T>() -> Poll<io::Result<T>> {
     Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
@@ -53,88 +57,6 @@ impl WsConfig {
     }
 }
 
-struct Open<T: AsyncRead + AsyncWrite + Unpin> {
-    config: WsConfig,
-    transport: T,
-    reader_is_attached: bool,
-    timeout: Option<(Timer, bool)>,
-    decode_state: DecodeState,
-    encode_state: EncodeState,
-    received_close: Option<WsControlFramePayload>
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
-    fn check_timeout<T>(&mut self, cx: &mut Context, e: T) -> Poll<T> {
-        let ping_timer = match &mut self.timeout {
-            None => self.timeout.insert((Timer::interval(self.config.timeout), false)),
-            Some(ping_timer) => ping_timer,
-        };
-        if let Poll::Ready(_) = ping_timer.0.poll_next() {
-            if ping_timer.1 {
-                self.decode_state.set_err(WsConnectionError::Timeout);
-                return Poll::Ready(e)
-            }
-            self.encode_state.queue_control(WsControlFrame::new(WsControlFrameKind::Ping, &[]));
-            ping_timer.1 = true;
-        }
-        Poll::Pending
-    }
-    fn poll(&mut self, cx: &mut Context) -> (Poll<DecodeReady>, Poll<EncodeReady>) {
-        loop {
-            let pd = self.decode_state.poll(&mut self.transport, cx);
-            let pd  = match pd {
-                Poll::Pending => self.check_timeout(cx, DecodeReady::Error),
-                Poll::Ready(DecodeReady::MessageData) => Poll::Ready(DecodeReady::MessageData),
-                Poll::Ready(r) => {
-                    self.timeout.take();
-                    if let DecodeReady::Control(_kind) = r {
-                        let mut control = self.decode_state.take_control().unwrap();
-                        match control.kind() {
-                            WsControlFrameKind::Ping => {
-                                control.kind = WsControlFrameKind::Pong;
-                                self.encode_state.queue_control(control);
-                            }
-                            WsControlFrameKind::Pong => {}
-                            WsControlFrameKind::Close => self.encode_state.queue_control(control),
-                        }
-                        continue
-                    }
-                    Poll::Ready(r)
-                },
-            };
-            let pe = self.encode_state.poll(&mut self.transport, cx, self.config.mask);
-            return (pd, pe)
-        }
-    }
-    pub(crate) fn poll_read(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            let (pd, pe) = self.poll(cx);
-            return match pd {
-                Poll::Ready(DecodeReady::MessageData) => {
-                    match self.decode_state.poll_read(&mut self.transport, cx, buf) {
-                        Poll::Ready(n) => match n {
-                            0 => continue,
-                            n => Poll::Ready(Ok(n)),
-                        },
-                        Poll::Pending => self.check_timeout(cx, io::ErrorKind::BrokenPipe.into()),
-                    }
-                }
-                Poll::Ready(DecodeReady::MessageEnd) => {
-                    self.decode_state.take_message_end();
-                    open.reader_is_attached = false;
-                    Poll::Ready(Ok(0))
-                }
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(r) => unreachable!("{:?} is impossible during read", r),
-            }
-        }
-    }
-}
-
 pub(crate) enum WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
     Open(Open<T>),
     ClosedError(WsConnectionError),
@@ -151,7 +73,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             timeout: None,
             decode_state: DecodeState::new(),
             encode_state: EncodeState::new(),
-            received_close: None
+            received_close: None,
         })
     }
     pub(crate) fn poll_next_writer(
@@ -163,9 +85,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             Self::Open(open) => open,
             _ => return Poll::Ready(false),
         };
-        match open.encode_state.poll(&mut self.transport, cx, self.config.mask) {
+        match open.encode_state.poll(&mut open.transport, cx, open.config.mask) {
             Poll::Ready(EncodeReady::FlushedMessages) => {
-                self.encode_state.start_message(kind);
+                open.encode_state.start_message(kind);
                 Poll::Ready(true)
             }
             Poll::Ready(EncodeReady::Error | EncodeReady::Done) => Poll::Ready(false),
@@ -187,7 +109,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         while total != buf.len() {
             match open
                 .encode_state
-                .poll(&mut self.transport, cx, self.config.mask)
+                .poll(&mut open.transport, cx, open.config.mask)
             {
                 Poll::Ready(EncodeReady::Error | EncodeReady::Done) => return broken_pipe(),
                 Poll::Pending => return Poll::Pending,
@@ -196,7 +118,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             }
             total += open
                 .encode_state
-                .append_data(&buf[total..], self.config.mask)
+                .append_data(&buf[total..], open.config.mask)
         }
         Poll::Ready(Ok(total))
     }
@@ -235,7 +157,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 Poll::Ready(EncodeReady::Error | EncodeReady::Done) => return broken_pipe(),
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(EncodeReady::Buffering | EncodeReady::FlushedFrames) => {
-                    self.encode_state.end_message(open.config.mask)
+                    open.encode_state.end_message(open.config.mask)
                 }
             }
         }
@@ -256,21 +178,44 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
     ) -> Poll<Option<Result<WsMessageKind, WsConnectionError>>> {
         let open = match self {
             Self::Open(open) => open,
-            _ => return todo!(),
+            Self::ClosedErrorConsumed | Self::ClosedSuccessfully(_) => return Poll::Ready(None),
+            Self::ClosedError(_) => {
+                if let Self::ClosedError(err) = replace(self, Self::ClosedErrorConsumed) {
+                    return Poll::Ready(Some(Err(err)));
+                }
+                unreachable!();
+            }
         };
 
-        let (pd, _pe) = open.poll(cx);
 
         loop {
-            let _ = self
-                .encode_state
-                .poll(&mut self.transport, cx, self.config.mask);
-            if self.reader_is_attached {
+            let (pd, _pe) = open.poll(cx);
+            match pd {
+                Poll::Ready(OpenReady::MessageStart) => {
+                    if let Some(kind) = open.decode_state.take_message_start() {
+                        self.reader_is_attached = true;
+                        return Poll::Ready(Some(Ok(kind)));
+                    }
+                    unreachable!();
+                }
+                Poll::Ready(OpenReady::MessageData) => {
+                    if open.reader_is_attached {
+                        return Poll::Pending;
+                    }
+                    match open.poll_read(cx, &mut [0u8; 1300]) {
+                        Poll::Ready(_) => continue,
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                Poll::Ready(_) => Poll::Pending,
+                Poll::Pending => {}
+            }
+            if open.reader_is_attached {
                 return Poll::Pending;
             }
-            match self
+            match open
                 .decode_state
-                .poll(&mut self.transport, cx, &mut [0u8; 1300])
+                .poll_read(&mut open.transport, cx, &mut [0u8; 1300])
             {
                 ControlFlow::Continue(frame) => self.handle_control_frame(frame),
                 ControlFlow::Break(Poll::Ready(_)) => {}
@@ -347,8 +292,8 @@ pub enum WsConnectionError {
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     FrameDecodeError(#[from] FrameDecodeError),
-    #[error("timeout: {0:?}")]
+    #[error("timeout")]
     Timeout,
     #[error("unexpected: {0:?}")]
-    UnexpectedFrameKind(WsDataFrameKind),
+    UnexpectedFrameKind(#[from] WsDataFrameKind),
 }

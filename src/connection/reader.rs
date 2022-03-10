@@ -1,4 +1,4 @@
-use crate::connection::waker::new_waker;
+use crate::connection::waker::{new_waker, Wakers};
 use crate::connection::WsConnectionInner;
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite};
@@ -6,17 +6,18 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::ops::DerefMut;
 
 pub struct WsMessageReader<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
-    inner: Option<Arc<Mutex<WsConnectionInner<T>>>>,
+    parent: Option<Arc<Mutex<(WsConnectionInner<T>, Wakers)>>>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsMessageReader<T> {
-    pub(crate) fn new(kind: WsMessageKind, inner: &Arc<Mutex<WsConnectionInner<T>>>) -> Self {
+    pub(crate) fn new(kind: WsMessageKind, parent: &Arc<Mutex<(WsConnectionInner<T>, Wakers)>>) -> Self {
         Self {
             kind,
-            inner: Some(inner.clone()),
+            parent: Some(parent.clone()),
         }
     }
     pub fn kind(&self) -> WsMessageKind {
@@ -33,11 +34,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
         if buf.len() == 0 {
             return Poll::Ready(Ok(0));
         }
-        let this = self.get_mut();
-        if let Some(inner) = &this.inner {
-            let waker = new_waker(Arc::downgrade(inner));
-            let mut inner = inner.lock().unwrap();
-            inner.reader_waker = Some(cx.waker().clone());
+        if let Some(parent) = &self.parent {
+            let waker = new_waker(Arc::downgrade(parent));
+            let mut guard = parent.lock().unwrap();
+            let (inner, wakers) = guard.deref_mut();
+            wakers.reader_waker = Some(cx.waker().clone());
             let n = match inner.poll_read(&mut Context::from_waker(&waker), buf) {
                 Poll::Ready(r) => match r {
                     Ok(r) => r,
@@ -47,8 +48,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
             };
             if n == 0 {
                 inner.detach_reader();
-                drop(inner);
-                this.inner.take();
+                drop(guard);
+                self.parent.take();
             }
             return Poll::Ready(Ok(n));
         }
@@ -58,8 +59,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Drop for WsMessageReader<T> {
     fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.lock().unwrap().detach_reader();
+        if let Some(parent) = self.parent.take() {
+            let mut guard = parent.lock().unwrap();
+            let (inner, wakers) = guard.deref_mut();
+            inner.detach_reader();
+            wakers.reader_waker.take();
         }
     }
 }
