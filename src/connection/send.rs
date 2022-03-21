@@ -1,6 +1,6 @@
 use crate::connection::waker::{new_waker, Wakers};
 use crate::connection::writer::WsMessageWriter;
-use crate::connection::WsConnectionInner;
+use crate::connection::{WsConnectionError, WsConnectionInner};
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite, Future};
 use std::ops::DerefMut;
@@ -8,7 +8,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-#[derive(Clone)]
 pub struct WsSend<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
     parent: Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
@@ -23,6 +22,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsSend<T> {
             kind,
             parent: parent.clone(),
         }
+    }
+    pub fn kind(&self) -> WsMessageKind {
+        self.kind
+    }
+    pub fn err(&self) -> Option<Arc<WsConnectionError>> {
+        self.parent.lock().unwrap().0.err()
     }
 }
 
