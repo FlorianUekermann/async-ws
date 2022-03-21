@@ -1,4 +1,5 @@
 use crate::connection::encode::EncodeState::Sending;
+use crate::connection::WsConnectionError;
 use crate::frame::{
     payload_mask, FrameHead, WsControlFrame, WsControlFrameKind, WsDataFrameKind, WsFrameKind,
 };
@@ -111,11 +112,11 @@ impl EncodeState {
             unreachable!()
         }
     }
-    pub fn take_err(&mut self) -> Option<io::Error> {
+    pub fn take_err(&mut self) -> Option<WsConnectionError> {
         if let EncodeState::Err(_) = self {
             let old = replace(self, EncodeState::Done);
             match old {
-                EncodeState::Err(err) => return Some(err),
+                EncodeState::Err(err) => return Some(err.into()),
                 _ => unreachable!(),
             }
         }

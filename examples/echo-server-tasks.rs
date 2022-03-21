@@ -1,7 +1,7 @@
 use anyhow::bail;
 use async_http_codec::head::encode::ResponseHeadEncoder;
 use async_net_server_utils::tcp::{TcpIncoming, TcpStream};
-use async_ws::connection::{WsConfig, WsConnection, WsMessageReader, WsSend};
+use async_ws::connection::{WsConfig, WsConnection, WsConnectionError, WsMessageReader, WsSend};
 use async_ws::http::{is_upgrade_request, upgrade_response};
 use futures::executor::{LocalPool, LocalSpawner};
 use futures::prelude::*;
@@ -10,6 +10,7 @@ use http::{HeaderValue, Request, Response};
 use log::LevelFilter;
 use simple_logger::SimpleLogger;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 const CLIENT_HTML: &str = include_str!("./echo-client.html");
 
@@ -75,6 +76,10 @@ async fn ws_handler(
                 };
             })
             .unwrap()
+    }
+    match ws.err() {
+        None => log::info!("websocket closed without error"),
+        Some(err) => log::error!("websocket closed with error: {:?}", err),
     }
     Ok(())
 }

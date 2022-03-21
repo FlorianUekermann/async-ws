@@ -42,6 +42,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
     pub(crate) fn take_rx_err(&mut self) -> Option<WsConnectionError> {
         self.decode_state.take_err()
     }
+    pub(crate) fn take_tx_err(&mut self) -> Option<WsConnectionError> {
+        self.encode_state.take_err()
+    }
     fn check_timeout<U>(&mut self, cx: &mut Context, e: U) -> Poll<U> {
         let ping_timer = match &mut self.timeout {
             None => self
@@ -142,6 +145,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
                     Poll::Ready(Ok(0))
                 }
                 Poll::Pending => Poll::Pending,
+                Poll::Ready(OpenReady::Error) => {
+                    let err = self.take_rx_err().unwrap();
+                    self.decode_state.set_err(err);
+                    return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                }
                 Poll::Ready(r) => unreachable!("{:?} is impossible during read", r),
             };
         }

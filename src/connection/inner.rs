@@ -16,12 +16,14 @@ fn broken_pipe<T>() -> Poll<io::Result<T>> {
     Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
 }
 
+#[derive(Debug)]
 pub(crate) enum InnerRxReady {
     MessageStart,
     MessageData,
     MessageEnd,
 }
 
+#[derive(Debug)]
 pub(crate) enum InnerTxReady {
     FlushedFrames,
     FlushedMessages,
@@ -66,7 +68,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         };
         let p_tx = match p_tx {
             Poll::Ready(EncodeReady::Error) => {
-                *self = ClosedError(open.take_rx_err().unwrap().into());
+                *self = ClosedError(open.take_tx_err().unwrap().into());
                 return None;
             }
             Poll::Ready(EncodeReady::Done) => return None,
@@ -166,7 +168,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             None => return broken_pipe(),
             Some(x) => x,
         };
-        open.poll_read(cx, buf)
+        let p = open.poll_read(cx, buf);
+        if let Poll::Ready(Err(_)) = p {
+            self.poll(cx);
+        }
+        p
     }
     pub(crate) fn poll_next_reader(&mut self, cx: &mut Context<'_>) -> Poll<Option<WsMessageKind>> {
         let (open, p_rx, _p_tx) = match self.poll(cx) {
