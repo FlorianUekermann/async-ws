@@ -77,7 +77,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             Poll::Ready(EncodeReady::FlushedFrames) => Poll::Ready(InnerTxReady::FlushedFrames),
             Poll::Ready(EncodeReady::FlushedMessages) => Poll::Ready(InnerTxReady::FlushedMessages),
         };
-        // Remove reborrow when non-lexical lifetimes become stable.
+        // Remove this when non-lexical lifetimes become stable.
         let open = match self {
             Self::Open(open) => open,
             _ => unreachable!(),

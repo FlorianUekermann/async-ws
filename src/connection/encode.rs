@@ -140,7 +140,7 @@ impl EncodeState {
                     if let Some(frame) = frame_in_progress {
                         match frame.poll(transport, cx) {
                             Poll::Ready(FrameInProgressReady::Buffering) => {
-                                if flushed.is_none() {
+                                if flushed.is_none() && queued_control.is_none() {
                                     return Poll::Ready(EncodeReady::Buffering);
                                 }
                                 frame.start_writing(false);
