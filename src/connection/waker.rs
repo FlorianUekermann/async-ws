@@ -41,7 +41,7 @@ pub(crate) fn new_waker<T: AsyncRead + AsyncWrite + Unpin>(
             raw as *const Mutex<(WsConnectionInner<T>, Wakers)>,
         ));
         if let Some(strong) = weak.upgrade() {
-            let guard = strong.lock().unwrap();
+            let mut guard = strong.lock().unwrap();
             let wakers = take(&mut guard.1);
             drop(guard);
             fn take_and_wake(mut o: Option<Waker>) {

@@ -17,6 +17,7 @@ utf-8 = "0.7.6"
 generic_static = "0.2.0"
 async-io = "1.6.0"
 futures-lite = "1.12.0"
+strum = { version = "0.24", features = ["derive"] }
 
 [dev-dependencies]
 async-http-codec = { git = "https://github.com/FlorianUekermann/async-http-codec" }

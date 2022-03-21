@@ -8,11 +8,11 @@ mod send;
 mod waker;
 mod writer;
 
+pub use crate::connection::config::WsConfig;
 pub use crate::connection::reader::WsMessageReader;
 pub use crate::connection::send::WsSend;
 pub use crate::connection::writer::WsMessageWriter;
 
-use crate::connection::config::WsConfig;
 use crate::connection::inner::WsConnectionInner;
 use crate::connection::waker::{new_waker, Wakers};
 use crate::frame::{FrameDecodeError, WsDataFrameKind};
@@ -23,7 +23,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-#[derive(Clone)]
 pub struct WsConnection<T: AsyncRead + AsyncWrite + Unpin> {
     parent: Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
 }
@@ -40,10 +39,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnection<T> {
     pub fn send(&self, kind: WsMessageKind) -> WsSend<T> {
         WsSend::new(&self.parent, kind)
     }
+    pub fn err(&self) -> Option<Arc<WsConnectionError>> {
+        self.parent.lock().unwrap().0.err()
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Stream for WsConnection<T> {
-    type Item = Result<WsMessageReader<T>, WsConnectionError>;
+    type Item = WsMessageReader<T>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut guard = self.parent.lock().unwrap();
@@ -52,7 +54,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for WsConnection<T> {
         let waker = new_waker(Arc::downgrade(&self.parent));
         inner
             .poll_next_reader(&mut Context::from_waker(&waker))
-            .map(|o| o.map(|r| r.map(|kind| WsMessageReader::new(kind, &self.parent))))
+            .map(|o| o.map(|kind| WsMessageReader::new(kind, &self.parent)))
     }
 }
 
@@ -68,6 +70,12 @@ pub enum WsConnectionError {
     FrameDecodeError(#[from] FrameDecodeError),
     #[error("timeout")]
     Timeout,
-    #[error("unexpected frame kind")]
-    UnexpectedFrameKind(#[from] WsDataFrameKind),
+    #[error("unexpected frame kind {0}")]
+    UnexpectedFrameKind(WsDataFrameKind),
+}
+
+impl From<WsDataFrameKind> for WsConnectionError {
+    fn from(kind: WsDataFrameKind) -> Self {
+        WsConnectionError::UnexpectedFrameKind(kind)
+    }
 }

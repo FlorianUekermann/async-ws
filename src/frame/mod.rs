@@ -11,6 +11,7 @@ use futures::prelude::*;
 use std::error::Error;
 use std::io::Cursor;
 use std::io::Write;
+use strum::Display;
 
 #[derive(Copy, Clone, Debug)]
 pub enum WsFrame {
@@ -67,7 +68,7 @@ impl WsFrameKind {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Display, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WsDataFrameKind {
     Text,
     Binary,

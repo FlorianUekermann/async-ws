@@ -4,7 +4,6 @@ use crate::connection::{WsConfig, WsConnectionError};
 use crate::frame::{WsControlFrame, WsControlFrameKind, WsControlFramePayload};
 use async_io::Timer;
 use futures::prelude::*;
-use futures_lite::StreamExt;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -50,7 +49,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
                 .insert((Timer::interval(self.config.timeout), false)),
             Some(ping_timer) => ping_timer,
         };
-        if let Poll::Ready(_) = Pin::new(&ping_timer.0).poll_next(cx) {
+        if let Poll::Ready(_) = Pin::new(&mut ping_timer.0).poll_next(cx) {
             if ping_timer.1 {
                 self.decode_state.set_err(WsConnectionError::Timeout);
                 return Poll::Ready(e);

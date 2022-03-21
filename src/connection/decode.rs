@@ -9,7 +9,7 @@ use futures::{AsyncRead, AsyncWrite};
 use std::mem::replace;
 use utf8::Incomplete;
 
-pub(super) enum DecodeState {
+pub(crate) enum DecodeState {
     WaitingForMessageStart {
         frame_decoder: FrameDecoderState,
     },
@@ -147,7 +147,8 @@ impl DecodeState {
                 };
                 let frame_finished = payload.finished();
                 if let Err(err) = Self::validate_utf8(utf8, &buf[0..n], *fin && frame_finished) {
-                    self.set_err(err)
+                    self.set_err(err);
+                    return Poll::Ready(0);
                 }
                 if frame_finished {
                     *self = match fin {
@@ -167,7 +168,7 @@ impl DecodeState {
         *self = Self::Err(err)
     }
     pub fn take_err(&mut self) -> Option<WsConnectionError> {
-        if let Self::Err(err) = self {
+        if let Self::Err(_err) = self {
             if let Self::Err(err) = replace(self, Self::Done) {
                 return Some(err);
             }

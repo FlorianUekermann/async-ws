@@ -8,21 +8,21 @@ use crate::frame::WsControlFramePayload;
 use crate::message::WsMessageKind;
 use futures::prelude::*;
 use std::io;
-use std::mem::replace;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 fn broken_pipe<T>() -> Poll<io::Result<T>> {
     Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
 }
 
-enum InnerRxReady {
+pub(crate) enum InnerRxReady {
     MessageStart,
     MessageData,
     MessageEnd,
 }
 
-enum InnerTxReady {
+pub(crate) enum InnerTxReady {
     FlushedFrames,
     FlushedMessages,
     Buffering,
@@ -30,14 +30,19 @@ enum InnerTxReady {
 
 pub(crate) enum WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
     Open(Open<T>),
-    ClosedError(WsConnectionError),
-    ClosedErrorConsumed,
-    ClosedSuccessfully(WsControlFramePayload),
+    ClosedError(Arc<WsConnectionError>),
+    ClosedOk(WsControlFramePayload),
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
     pub(crate) fn with_config(transport: T, config: WsConfig) -> Self {
         Self::Open(Open::with_config(transport, config))
+    }
+    pub fn err(&self) -> Option<Arc<WsConnectionError>> {
+        match self {
+            ClosedError(err) => Some(err.clone()),
+            _ => None,
+        }
     }
     pub fn poll(
         &mut self,
@@ -50,7 +55,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         let (p_rx, p_tx) = open.poll(cx);
         let p_rx = match p_rx {
             Poll::Ready(OpenReady::Error) => {
-                *self = ClosedError(open.take_rx_err().unwrap());
+                *self = ClosedError(open.take_rx_err().unwrap().into());
                 return None;
             }
             Poll::Ready(OpenReady::Done) => return None,
@@ -61,7 +66,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         };
         let p_tx = match p_tx {
             Poll::Ready(EncodeReady::Error) => {
-                *self = ClosedError(open.take_rx_err().unwrap());
+                *self = ClosedError(open.take_rx_err().unwrap().into());
                 return None;
             }
             Poll::Ready(EncodeReady::Done) => return None,
@@ -70,25 +75,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             Poll::Ready(EncodeReady::FlushedFrames) => Poll::Ready(InnerTxReady::FlushedFrames),
             Poll::Ready(EncodeReady::FlushedMessages) => Poll::Ready(InnerTxReady::FlushedMessages),
         };
+        // Remove reborrow when non-lexical lifetimes become stable.
+        let open = match self {
+            Self::Open(open) => open,
+            _ => unreachable!(),
+        };
         Some((open, p_rx, p_tx))
     }
-    pub(crate) fn take_err(&mut self) -> Option<WsConnectionError> {
-        if let Self::ClosedError(_) = self {
-            if let Self::ClosedError(err) = replace(self, Self::ClosedErrorConsumed) {
-                return Some(err);
-            }
-        }
-        None
-    }
-    pub(crate) fn poll_next_writer(&mut self, kind: WsMessageKind, cx: &mut Context) -> Poll<bool> {
+    pub(crate) fn poll_next_writer(
+        &mut self,
+        kind: WsMessageKind,
+        cx: &mut Context,
+    ) -> Poll<Option<WsMessageKind>> {
         let (open, _p_rx, p_tx) = match self.poll(cx) {
-            None => return Poll::Ready(false),
+            None => return Poll::Ready(None),
             Some(x) => x,
         };
         match p_tx {
             Poll::Ready(InnerTxReady::FlushedMessages) => {
                 open.encode_state.start_message(kind);
-                Poll::Ready(true)
+                Poll::Ready(Some(kind))
             }
             _ => Poll::Pending,
         }
@@ -162,19 +168,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         };
         open.poll_read(cx, buf)
     }
-    pub(crate) fn poll_next_reader(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<WsMessageKind, WsConnectionError>>> {
+    pub(crate) fn poll_next_reader(&mut self, cx: &mut Context<'_>) -> Poll<Option<WsMessageKind>> {
         let (open, p_rx, _p_tx) = match self.poll(cx) {
-            None => return Poll::Ready(self.take_err().map(|err| Err(err))),
+            None => return Poll::Ready(None),
             Some(x) => x,
         };
         if !open.reader_is_attached {
             if let Poll::Ready(InnerRxReady::MessageStart) = p_rx {
                 let kind = open.decode_state.take_message_start().unwrap();
                 open.reader_is_attached = true;
-                return Poll::Ready(Some(Ok(kind)));
+                return Poll::Ready(Some(kind));
             }
         }
         Poll::Pending

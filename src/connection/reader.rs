@@ -30,7 +30,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsMessageReader<T> {
 
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {

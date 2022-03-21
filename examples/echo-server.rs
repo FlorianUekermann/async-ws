@@ -59,12 +59,17 @@ async fn ws_handler(mut transport: TcpStream, request: Request<()>) -> anyhow::R
         .encode(&mut transport, response)
         .await?;
     let mut ws = WsConnection::with_config(transport, WsConfig::server());
-    while let Some(event) = ws.next().await {
-        let mut reader = event?;
-        let mut writer = ws.send(reader.kind()).await?;
+    while let Some(mut reader) = ws.next().await {
+        let mut writer = match ws.send(reader.kind()).await {
+            None => break,
+            Some(w) => w,
+        };
         let n = futures::io::copy(&mut reader, &mut writer).await?;
         log::info!("echoed {:?} message with {} bytes", reader.kind(), n);
         writer.close().await?;
     }
-    Ok(())
+    match ws.err() {
+        None => Ok(()),
+        Some(err) => Err(err.into()),
+    }
 }

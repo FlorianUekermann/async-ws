@@ -35,8 +35,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Future for WsSend<T> {
         wakers.send_waker = Some(cx.waker().clone());
         let waker = new_waker(Arc::downgrade(&self.parent));
         match inner.poll_next_writer(self.kind, &mut Context::from_waker(&waker)) {
-            Poll::Ready(true) => Poll::Ready(Some(WsMessageWriter::new(self.kind, &self.parent))),
-            Poll::Ready(false) => Poll::Ready(None),
+            Poll::Ready(Some(_)) => {
+                Poll::Ready(Some(WsMessageWriter::new(self.kind, &self.parent)))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }
