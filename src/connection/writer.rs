@@ -40,7 +40,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsMessageWriter<T> {
                 let mut guard = parent.lock().unwrap();
                 let (inner, wakers) = guard.deref_mut();
                 wakers.writer_waker = Some(cx.waker().clone());
-                inner.poll_write(&mut Context::from_waker(&waker), buf)
+                let p = inner.poll_write(&mut Context::from_waker(&waker), buf);
+                wakers.wake_on_err(&p);
+                p
             }
             None => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
         }
@@ -53,7 +55,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsMessageWriter<T> {
                 let mut guard = parent.lock().unwrap();
                 let (inner, wakers) = guard.deref_mut();
                 wakers.writer_waker = Some(cx.waker().clone());
-                inner.poll_flush(&mut Context::from_waker(&waker))
+                let p = inner.poll_flush(&mut Context::from_waker(&waker));
+                wakers.wake_on_err(&p);
+                p
             }
             None => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
         }
@@ -67,6 +71,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsMessageWriter<T> {
                 let (inner, wakers) = guard.deref_mut();
                 wakers.writer_waker = Some(cx.waker().clone());
                 let p = inner.poll_close_writer(&mut Context::from_waker(&waker));
+                wakers.wake_on_err(&p);
                 if let Poll::Ready(Ok(())) = &p {
                     inner.detach_writer();
                     drop(guard);

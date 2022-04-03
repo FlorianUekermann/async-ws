@@ -109,7 +109,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
                             self.encode_state.queue_control(control);
                         }
                         WsControlFrameKind::Pong => {}
-                        WsControlFrameKind::Close => self.encode_state.queue_control(control),
+                        WsControlFrameKind::Close => {
+                            self.received_close = Some(control.payload);
+                            self.encode_state.queue_control(control)
+                        }
                     }
                     continue;
                 }
@@ -126,7 +129,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         loop {
-            let (pd, pe) = self.poll(cx);
+            let (pd, _pe) = self.poll(cx);
             return match pd {
                 Poll::Ready(OpenReady::MessageData) => {
                     match self.decode_state.poll_read(&mut self.transport, cx, buf) {

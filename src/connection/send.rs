@@ -43,7 +43,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Future for WsSend<T> {
             Poll::Ready(Some(_)) => {
                 Poll::Ready(Some(WsMessageWriter::new(self.kind, &self.parent)))
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                wakers.wake();
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }

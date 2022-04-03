@@ -230,12 +230,13 @@ impl DecodeState {
                 continue_message,
             } => {
                 let frame = *frame;
-                *self = match continue_message {
-                    Some(utf8) => Self::WaitingForMessageContinuation {
+                *self = match (frame.kind(), continue_message) {
+                    (WsControlFrameKind::Close, _) => Self::Done,
+                    (_, Some(utf8)) => Self::WaitingForMessageContinuation {
                         frame_decoder: FrameDecoderState::new(),
                         utf8: *utf8,
                     },
-                    None => Self::WaitingForMessageStart {
+                    (_, None) => Self::WaitingForMessageStart {
                         frame_decoder: FrameDecoderState::new(),
                     },
                 };

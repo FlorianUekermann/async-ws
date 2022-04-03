@@ -164,7 +164,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        let (open, p_rx, _p_tx) = match self.poll(cx) {
+        let (open, _p_rx, _p_tx) = match self.poll(cx) {
             None => return broken_pipe(),
             Some(x) => x,
         };

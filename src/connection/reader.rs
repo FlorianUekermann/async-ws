@@ -45,7 +45,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsMessageReader<T> {
             let n = match inner.poll_read(&mut Context::from_waker(&waker), buf) {
                 Poll::Ready(r) => match r {
                     Ok(r) => r,
-                    Err(err) => return Poll::Ready(Err(err)),
+                    Err(err) => {
+                        wakers.wake();
+                        return Poll::Ready(Err(err));
+                    }
                 },
                 Poll::Pending => return Poll::Pending,
             };

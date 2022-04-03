@@ -2,7 +2,7 @@ use crate::connection::WsConnectionInner;
 use futures::{AsyncRead, AsyncWrite};
 use std::mem::{take, ManuallyDrop};
 use std::sync::{Mutex, Weak};
-use std::task::{RawWaker, RawWakerVTable, Waker};
+use std::task::{Poll, RawWaker, RawWakerVTable, Waker};
 
 #[derive(Default)]
 pub(crate) struct Wakers {
@@ -10,6 +10,25 @@ pub(crate) struct Wakers {
     pub send_waker: Option<Waker>,
     pub writer_waker: Option<Waker>,
     pub reader_waker: Option<Waker>,
+}
+
+impl Wakers {
+    pub(crate) fn wake(&mut self) {
+        fn take_and_wake(o: &mut Option<Waker>) {
+            if let Some(w) = o.take() {
+                w.wake();
+            }
+        }
+        take_and_wake(&mut self.send_waker);
+        take_and_wake(&mut self.stream_waker);
+        take_and_wake(&mut self.writer_waker);
+        take_and_wake(&mut self.reader_waker);
+    }
+    pub(crate) fn wake_on_err<O, E>(&mut self, p: &Poll<Result<O, E>>) {
+        if let Poll::Ready(Err(_)) = &p {
+            self.wake()
+        }
+    }
 }
 
 pub(crate) fn new_waker<T: AsyncRead + AsyncWrite + Unpin>(
@@ -42,17 +61,9 @@ pub(crate) fn new_waker<T: AsyncRead + AsyncWrite + Unpin>(
         ));
         if let Some(strong) = weak.upgrade() {
             let mut guard = strong.lock().unwrap();
-            let wakers = take(&mut guard.1);
+            let mut wakers = take(&mut guard.1);
             drop(guard);
-            fn take_and_wake(mut o: Option<Waker>) {
-                if let Some(w) = o.take() {
-                    w.wake();
-                }
-            }
-            take_and_wake(wakers.send_waker);
-            take_and_wake(wakers.stream_waker);
-            take_and_wake(wakers.writer_waker);
-            take_and_wake(wakers.reader_waker);
+            wakers.wake();
         }
     }
 
