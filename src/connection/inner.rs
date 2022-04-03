@@ -16,18 +16,20 @@ fn broken_pipe<T>() -> Poll<io::Result<T>> {
     Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InnerRxReady {
     MessageStart,
     MessageData,
     MessageEnd,
+    Closed,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InnerTxReady {
     FlushedFrames,
     FlushedMessages,
     Buffering,
+    Closed,
 }
 
 pub(crate) enum WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
@@ -60,7 +62,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 *self = ClosedError(open.take_rx_err().unwrap().into());
                 return None;
             }
-            Poll::Ready(OpenReady::Done) => return None,
+            Poll::Ready(OpenReady::Done) => Poll::Ready(InnerRxReady::Closed),
             Poll::Pending => Poll::Pending,
             Poll::Ready(OpenReady::MessageStart) => Poll::Ready(InnerRxReady::MessageStart),
             Poll::Ready(OpenReady::MessageData) => Poll::Ready(InnerRxReady::MessageData),
@@ -71,12 +73,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 *self = ClosedError(open.take_tx_err().unwrap().into());
                 return None;
             }
-            Poll::Ready(EncodeReady::Done) => return None,
+            Poll::Ready(EncodeReady::Done) => Poll::Ready(InnerTxReady::Closed),
             Poll::Pending => Poll::Pending,
             Poll::Ready(EncodeReady::Buffering) => Poll::Ready(InnerTxReady::Buffering),
             Poll::Ready(EncodeReady::FlushedFrames) => Poll::Ready(InnerTxReady::FlushedFrames),
             Poll::Ready(EncodeReady::FlushedMessages) => Poll::Ready(InnerTxReady::FlushedMessages),
         };
+        if p_rx == Poll::Ready(InnerRxReady::Closed) && p_tx == Poll::Ready(InnerTxReady::Closed) {
+            *self = Self::ClosedOk(open.received_close.unwrap());
+            return None;
+        }
         // Remove this when non-lexical lifetimes become stable.
         let open = match self {
             Self::Open(open) => open,
@@ -113,7 +119,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 Some(x) => x,
             };
             match p_tx {
-                Poll::Ready(InnerTxReady::FlushedMessages) => return broken_pipe(),
+                Poll::Ready(InnerTxReady::FlushedMessages | InnerTxReady::Closed) => {
+                    return broken_pipe()
+                }
                 Poll::Pending => match total {
                     0 => return Poll::Pending,
                     n => return Poll::Ready(Ok(n)),
@@ -139,6 +147,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 }
                 Poll::Ready(InnerTxReady::Buffering) => open.encode_state.start_flushing(),
                 Poll::Pending => return Poll::Pending,
+                Poll::Ready(InnerTxReady::Closed) => return broken_pipe(),
             }
         }
     }
@@ -156,6 +165,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
                 Poll::Ready(InnerTxReady::Buffering | InnerTxReady::FlushedFrames) => {
                     open.encode_state.end_message(open.config.mask)
                 }
+                Poll::Ready(InnerTxReady::Closed) => return broken_pipe(),
             }
         }
     }

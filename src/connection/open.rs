@@ -24,7 +24,7 @@ pub(crate) struct Open<T: AsyncRead + AsyncWrite + Unpin> {
     timeout: Option<(Timer, bool)>,
     pub decode_state: DecodeState,
     pub encode_state: EncodeState,
-    received_close: Option<WsControlFramePayload>,
+    pub received_close: Option<WsControlFramePayload>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
