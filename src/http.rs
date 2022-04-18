@@ -14,7 +14,7 @@ pub fn upgrade_request() -> Builder {
         .header("Sec-WebSocket-Key", base64::encode(nonce))
 }
 
-pub fn is_upgrade_request(request: &Request<()>) -> bool {
+pub fn is_upgrade_request<T>(request: &Request<T>) -> bool {
     request.method() == http::Method::GET
         && request
             .headers()
@@ -37,7 +37,7 @@ pub fn is_upgrade_request(request: &Request<()>) -> bool {
         && request.headers().get("Sec-WebSocket-Key").is_some()
 }
 
-pub fn upgrade_response(request: &Request<()>) -> Option<Response<()>> {
+pub fn upgrade_response<T>(request: &Request<T>) -> Option<Response<()>> {
     let challenge = match (
         is_upgrade_request(request),
         request.headers().get("Sec-WebSocket-Key"),
