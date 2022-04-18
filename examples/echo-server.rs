@@ -1,4 +1,4 @@
-use async_http_codec::head::encode::ResponseHeadEncoder;
+use async_http_codec::ResponseHeadEncoder;
 use async_net_server_utils::tcp::{TcpIncoming, TcpStream};
 use async_ws::connection::{WsConfig, WsConnection};
 use async_ws::http::{is_upgrade_request, upgrade_response};
@@ -41,12 +41,14 @@ fn main() {
 }
 
 async fn serve_html(mut transport: TcpStream) -> anyhow::Result<()> {
-    let response = Response::builder()
+    let resp_head = Response::builder()
         .header("Content-Length", HeaderValue::from(CLIENT_HTML.len()))
         .header("Connection", HeaderValue::from_static("close"))
-        .body(())?;
+        .body(())?
+        .into_parts()
+        .0;
     ResponseHeadEncoder::default()
-        .encode(&mut transport, response)
+        .encode(&mut transport, resp_head)
         .await?;
     transport.write_all(CLIENT_HTML.as_ref()).await?;
     transport.close().await?;
@@ -54,9 +56,9 @@ async fn serve_html(mut transport: TcpStream) -> anyhow::Result<()> {
 }
 
 async fn ws_handler(mut transport: TcpStream, request: Request<()>) -> anyhow::Result<()> {
-    let response = upgrade_response(&request).unwrap();
+    let resp_head = upgrade_response(&request).unwrap().into_parts().0;
     ResponseHeadEncoder::default()
-        .encode(&mut transport, response)
+        .encode(&mut transport, resp_head)
         .await?;
     let mut ws = WsConnection::with_config(transport, WsConfig::server());
     while let Some(mut reader) = ws.next().await {

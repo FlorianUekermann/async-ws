@@ -1,7 +1,7 @@
 use anyhow::bail;
-use async_http_codec::head::encode::ResponseHeadEncoder;
+use async_http_codec::ResponseHeadEncoder;
 use async_net_server_utils::tcp::{TcpIncoming, TcpStream};
-use async_ws::connection::{WsConfig, WsConnection, WsConnectionError, WsMessageReader, WsSend};
+use async_ws::connection::{WsConfig, WsConnection, WsMessageReader, WsSend};
 use async_ws::http::{is_upgrade_request, upgrade_response};
 use futures::executor::{LocalPool, LocalSpawner};
 use futures::prelude::*;
@@ -10,7 +10,6 @@ use http::{HeaderValue, Request, Response};
 use log::LevelFilter;
 use simple_logger::SimpleLogger;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 
 const CLIENT_HTML: &str = include_str!("./echo-client.html");
 
@@ -44,12 +43,14 @@ fn main() {
 }
 
 async fn serve_html(mut transport: TcpStream) -> anyhow::Result<()> {
-    let response = Response::builder()
+    let resp_head = Response::builder()
         .header("Content-Length", HeaderValue::from(CLIENT_HTML.len()))
         .header("Connection", HeaderValue::from_static("close"))
-        .body(())?;
+        .body(())?
+        .into_parts()
+        .0;
     ResponseHeadEncoder::default()
-        .encode(&mut transport, response)
+        .encode(&mut transport, resp_head)
         .await?;
     transport.write_all(CLIENT_HTML.as_ref()).await?;
     transport.close().await?;
@@ -61,9 +62,9 @@ async fn ws_handler(
     request: Request<()>,
     spawner: LocalSpawner,
 ) -> anyhow::Result<()> {
-    let response = upgrade_response(&request).unwrap();
+    let resp_head = upgrade_response(&request).unwrap().into_parts().0;
     ResponseHeadEncoder::default()
-        .encode(&mut transport, response)
+        .encode(&mut transport, resp_head)
         .await?;
     let mut ws = WsConnection::with_config(transport, WsConfig::server());
     while let Some(reader) = ws.next().await {
@@ -86,7 +87,7 @@ async fn ws_handler(
 
 async fn msg_handler(
     mut reader: WsMessageReader<TcpStream>,
-    mut ws_send: WsSend<TcpStream>,
+    ws_send: WsSend<TcpStream>,
 ) -> anyhow::Result<()> {
     let mut writer = match ws_send.await {
         Some(w) => w,

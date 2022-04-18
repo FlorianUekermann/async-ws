@@ -1,5 +1,18 @@
-use http::{HeaderValue, Request, Response, StatusCode};
+use http::request::Builder;
+use http::{HeaderValue, Method, Request, Response, StatusCode};
+use rand::{thread_rng, Rng};
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
+
+pub fn upgrade_request() -> Builder {
+    let mut nonce = [0u8; 16];
+    thread_rng().fill(&mut nonce);
+    Request::builder()
+        .method(Method::GET)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", base64::encode(nonce))
+}
 
 pub fn is_upgrade_request(request: &Request<()>) -> bool {
     request.method() == http::Method::GET
