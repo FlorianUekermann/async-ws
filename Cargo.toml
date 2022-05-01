@@ -1,6 +1,6 @@
 [package]
 name = "async-ws"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2018"
 description = "async websocket implementation"
 license = "Apache-2.0 OR MIT"
@@ -21,6 +21,7 @@ strum = { version = "0.24", features = ["derive"] }
 
 [dev-dependencies]
 async-http-codec = "0.4.2"
-async-net-server-utils = { git = "https://github.com/FlorianUekermann/async-net-server-utils" }
+async-web-server = "0.2.1"
 simple_logger = "1.13.0"
 anyhow = "1.0.48"
+smol-timeout = "0.6.0"

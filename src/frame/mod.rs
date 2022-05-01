@@ -158,6 +158,14 @@ impl WsControlFrame {
     pub fn kind(&self) -> WsControlFrameKind {
         self.kind
     }
+    pub fn head(&self, mask: [u8; 4]) -> FrameHead {
+        FrameHead {
+            fin: true,
+            opcode: self.kind.opcode(),
+            mask,
+            payload_len: self.payload().len() as u64,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -60,6 +60,28 @@ pub fn upgrade_response<T>(request: &Request<T>) -> Option<Response<()>> {
     Some(response)
 }
 
+pub fn check_upgrade_response<T, U>(request: &Request<T>, response: &Response<U>) -> bool {
+    let challenge = match (
+        is_upgrade_request(request),
+        request.headers().get("Sec-WebSocket-Key"),
+    ) {
+        (false, _) | (true, None) => return false,
+        (true, Some(challenge)) => challenge.as_bytes(),
+    };
+    response.status() == StatusCode::SWITCHING_PROTOCOLS
+        && response
+            .headers()
+            .get("Connection")
+            .map(HeaderValue::as_bytes)
+            == Some(b"Upgrade")
+        && response.headers().get("Upgrade").map(HeaderValue::as_bytes) == Some(b"websocket")
+        && response
+            .headers()
+            .get("Sec-WebSocket-Accept")
+            .map(HeaderValue::as_bytes)
+            == Some(upgrade_challenge_response(challenge).as_bytes())
+}
+
 fn upgrade_challenge_response(challenge: &[u8]) -> String {
     let mut ctx = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
     ctx.update(challenge);

@@ -204,7 +204,12 @@ impl FrameInProgress {
             kind,
             buffer: [0u8; 1300],
             mask: match mask {
-                true => thread_rng().next_u32().to_ne_bytes(),
+                true => loop {
+                    let r = thread_rng().next_u32();
+                    if r != 0 {
+                        break r.to_ne_bytes();
+                    }
+                },
                 false => [0u8, 0u8, 0u8, 0u8],
             },
             written: None,

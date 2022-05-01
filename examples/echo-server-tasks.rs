@@ -1,6 +1,6 @@
 use anyhow::bail;
-use async_http_codec::ResponseHeadEncoder;
-use async_net_server_utils::tcp::{TcpIncoming, TcpStream};
+use async_http_codec::{BodyDecode, ResponseHeadEncoder};
+use async_web_server::tcp::{TcpIncoming, TcpStream};
 use async_ws::connection::{WsConfig, WsConnection, WsMessageReader, WsSend};
 use async_ws::http::{is_upgrade_request, upgrade_response};
 use futures::executor::{LocalPool, LocalSpawner};
@@ -25,16 +25,16 @@ fn main() {
         let mut http_incoming = TcpIncoming::bind((Ipv4Addr::UNSPECIFIED, 8080))
             .unwrap()
             .http();
-        while let Some((transport, request)) = http_incoming.next().await {
+        while let Some(request) = http_incoming.next().await {
             let spawner_clone = spawner.clone();
             spawner
                 .spawn_local(async move {
                     if is_upgrade_request(&request) {
                         log::info!("upgrade request received");
-                        let result = ws_handler(transport, request, spawner_clone).await;
+                        let result = ws_handler(request, spawner_clone).await;
                         log::info!("connection closed: {:?}", result)
                     } else {
-                        log::info!("serve html: {:?}", serve_html(transport).await);
+                        log::info!("serve html: {:?}", serve_html(request).await);
                     }
                 })
                 .unwrap()
@@ -42,13 +42,15 @@ fn main() {
     })
 }
 
-async fn serve_html(mut transport: TcpStream) -> anyhow::Result<()> {
+async fn serve_html(request: Request<BodyDecode<TcpStream>>) -> anyhow::Result<()> {
     let resp_head = Response::builder()
         .header("Content-Length", HeaderValue::from(CLIENT_HTML.len()))
         .header("Connection", HeaderValue::from_static("close"))
         .body(())?
         .into_parts()
         .0;
+    let (_request_head, body) = request.into_parts();
+    let mut transport = body.checkpoint().0;
     ResponseHeadEncoder::default()
         .encode(&mut transport, resp_head)
         .await?;
@@ -58,11 +60,12 @@ async fn serve_html(mut transport: TcpStream) -> anyhow::Result<()> {
 }
 
 async fn ws_handler(
-    mut transport: TcpStream,
-    request: Request<()>,
+    request: Request<BodyDecode<TcpStream>>,
     spawner: LocalSpawner,
 ) -> anyhow::Result<()> {
     let resp_head = upgrade_response(&request).unwrap().into_parts().0;
+    let (_request_head, body) = request.into_parts();
+    let mut transport = body.checkpoint().0;
     ResponseHeadEncoder::default()
         .encode(&mut transport, resp_head)
         .await?;
