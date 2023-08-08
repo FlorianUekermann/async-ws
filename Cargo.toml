@@ -1,6 +1,6 @@
 [package]
 name = "async-ws"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2018"
 description = "async websocket implementation"
 license = "Apache-2.0 OR MIT"

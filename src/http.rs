@@ -72,9 +72,13 @@ pub fn check_upgrade_response<T, U>(request: &Request<T>, response: &Response<U>
         && response
             .headers()
             .get("Connection")
-            .map(HeaderValue::as_bytes)
-            == Some(b"Upgrade")
-        && response.headers().get("Upgrade").map(HeaderValue::as_bytes) == Some(b"websocket")
+            .filter(|v| v.as_bytes().eq_ignore_ascii_case(b"Upgrade"))
+            .is_some()
+        && response
+            .headers()
+            .get("Upgrade")
+            .filter(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"))
+            .is_some()
         && response
             .headers()
             .get("Sec-WebSocket-Accept")
