@@ -1,12 +1,12 @@
 [package]
 name = "async-ws"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2018"
 description = "async websocket implementation"
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
-http = "0.2.5"
+http = "1.0.0"
 futures = { version = "0.3.17", features = ["executor"] }
 ring = "0.16"
 base64 = "0.13.0"
