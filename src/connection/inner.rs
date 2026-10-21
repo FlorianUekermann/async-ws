@@ -4,7 +4,6 @@ use crate::connection::config::WsConfig;
 use crate::connection::open::{Open, OpenReady};
 use crate::connection::WsConnectionError;
 use crate::connection::WsConnectionInner::ClosedError;
-use crate::frame::WsControlFramePayload;
 use crate::message::WsMessageKind;
 use futures::prelude::*;
 use std::io;
@@ -32,10 +31,11 @@ pub(crate) enum InnerTxReady {
     Closed,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum WsConnectionInner<T: AsyncRead + AsyncWrite + Unpin> {
     Open(Open<T>),
     ClosedError(Arc<WsConnectionError>),
-    ClosedOk(WsControlFramePayload),
+    ClosedOk,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
@@ -80,7 +80,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> WsConnectionInner<T> {
             Poll::Ready(EncodeReady::FlushedMessages) => Poll::Ready(InnerTxReady::FlushedMessages),
         };
         if p_rx == Poll::Ready(InnerRxReady::Closed) && p_tx == Poll::Ready(InnerTxReady::Closed) {
-            *self = Self::ClosedOk(open.received_close.unwrap());
+            let _ = open.received_close.unwrap();
+            *self = Self::ClosedOk;
             return None;
         }
         // Remove this when non-lexical lifetimes become stable.

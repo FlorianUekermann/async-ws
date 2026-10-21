@@ -6,10 +6,11 @@ use crate::frame::{
 use crate::message::WsMessageKind;
 use futures::task::{Context, Poll};
 use futures::{io, AsyncRead, AsyncWrite};
-use rand::{thread_rng, RngCore};
+use rand::RngCore;
 use std::mem::replace;
 use std::pin::Pin;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum EncodeState {
     Sending {
@@ -205,7 +206,7 @@ impl FrameInProgress {
             buffer: [0u8; 1300],
             mask: match mask {
                 true => loop {
-                    let r = thread_rng().next_u32();
+                    let r = rand::rng().next_u32();
                     if r != 0 {
                         break r.to_ne_bytes();
                     }

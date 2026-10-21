@@ -1,4 +1,4 @@
-pub mod decode;
+mod decode;
 pub use decode::*;
 
 // Masks or unmasks a buffer with payload bytes. The offset is the offset of the buffer within the
@@ -7,7 +7,7 @@ pub use decode::*;
 pub fn payload_mask(mask: [u8; 4], mut offset: usize, buffer: &mut [u8]) {
     if mask != [0u8, 0u8, 0u8, 0u8] {
         for byte in buffer.iter_mut() {
-            offset = offset % 4;
+            offset %= 4;
             *byte ^= mask[offset];
             offset += 1;
         }

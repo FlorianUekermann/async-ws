@@ -24,6 +24,12 @@ pub struct FrameHeadDecodeState {
     buffer_len: usize,
 }
 
+impl Default for FrameHeadDecodeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrameHeadDecodeState {
     pub fn new() -> Self {
         Self {

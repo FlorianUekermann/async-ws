@@ -52,7 +52,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
                 .insert((Timer::interval(self.config.timeout), false)),
             Some(ping_timer) => ping_timer,
         };
-        if let Poll::Ready(_) = Pin::new(&mut ping_timer.0).poll_next(cx) {
+        if Pin::new(&mut ping_timer.0).poll_next(cx).is_ready() {
             if ping_timer.1 {
                 self.decode_state.set_err(WsConnectionError::Timeout);
                 return Poll::Ready(e);
@@ -100,7 +100,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Open<T> {
                 }
                 Poll::Ready(DecodeReady::Error) => Poll::Ready(OpenReady::Error),
                 Poll::Ready(DecodeReady::Done) => Poll::Ready(OpenReady::Done),
-                Poll::Ready(DecodeReady::Control(_)) => {
+                Poll::Ready(DecodeReady::Control) => {
                     self.timeout.take();
                     let mut control = self.decode_state.take_control().unwrap();
                     match control.kind() {

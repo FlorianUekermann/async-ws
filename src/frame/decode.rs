@@ -28,6 +28,12 @@ pub enum FrameDecoderState {
     },
 }
 
+impl Default for FrameDecoderState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrameDecoderState {
     pub fn new() -> Self {
         Self::Head(FrameHeadDecodeState::new())

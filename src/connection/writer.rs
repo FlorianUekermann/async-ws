@@ -1,23 +1,20 @@
-use crate::connection::waker::{new_waker, Wakers};
-use crate::connection::WsConnectionInner;
+use crate::connection::waker::new_waker;
+use crate::connection::SharedConnection;
 use crate::message::WsMessageKind;
 use futures::{AsyncRead, AsyncWrite};
 use std::io;
 use std::ops::DerefMut;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 pub struct WsMessageWriter<T: AsyncRead + AsyncWrite + Unpin> {
     kind: WsMessageKind,
-    parent: Option<Arc<Mutex<(WsConnectionInner<T>, Wakers)>>>,
+    parent: Option<SharedConnection<T>>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsMessageWriter<T> {
-    pub(crate) fn new(
-        kind: WsMessageKind,
-        parent: &Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
-    ) -> Self {
+    pub(crate) fn new(kind: WsMessageKind, parent: &SharedConnection<T>) -> Self {
         Self {
             kind,
             parent: Some(parent.clone()),

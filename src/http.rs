@@ -1,17 +1,19 @@
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use http::request::Builder;
 use http::{HeaderValue, Method, Request, Response, StatusCode};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
 
 pub fn upgrade_request() -> Builder {
     let mut nonce = [0u8; 16];
-    thread_rng().fill(&mut nonce);
+    rand::rng().fill(&mut nonce);
     Request::builder()
         .method(Method::GET)
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", base64::encode(nonce))
+        .header("Sec-WebSocket-Key", STANDARD.encode(nonce))
 }
 
 pub fn is_upgrade_request<T>(request: &Request<T>) -> bool {
@@ -21,9 +23,7 @@ pub fn is_upgrade_request<T>(request: &Request<T>) -> bool {
             .get("Connection")
             .iter()
             .flat_map(|v| v.as_bytes().split(|&c| c == b' ' || c == b','))
-            .filter(|h| h.eq_ignore_ascii_case(b"Upgrade"))
-            .next()
-            .is_some()
+            .any(|h| h.eq_ignore_ascii_case(b"Upgrade"))
         && request
             .headers()
             .get("Upgrade")
@@ -90,7 +90,7 @@ fn upgrade_challenge_response(challenge: &[u8]) -> String {
     let mut ctx = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
     ctx.update(challenge);
     ctx.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    base64::encode(ctx.finish())
+    STANDARD.encode(ctx.finish())
 }
 
 #[cfg(test)]

@@ -1,14 +1,14 @@
-use async_web_server::tcp::{TcpIncoming, TcpStream};
+use async_net::{TcpListener, TcpStream};
 use async_ws::connection::{WsConfig, WsConnection};
 use futures::future::join;
-use futures::prelude::*;
 use std::net::Ipv4Addr;
 use std::time::Duration;
+
 async fn start_server_ws(
-    mut tcp_incoming: TcpIncoming,
+    listener: TcpListener,
     timeout: Option<Duration>,
 ) -> WsConnection<TcpStream> {
-    let tcp_stream = tcp_incoming.next().await.unwrap();
+    let (tcp_stream, _) = listener.accept().await.unwrap();
     let mut config = WsConfig::server();
     if let Some(timeout) = timeout {
         config.timeout = timeout;
@@ -25,10 +25,10 @@ async fn start_client_transport(port: u16) -> TcpStream {
 pub async fn start_server_ws_and_client_transport(
     server_timeout: Option<Duration>,
 ) -> (WsConnection<TcpStream>, TcpStream) {
-    let tcp_incoming = TcpIncoming::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = tcp_incoming.local_addr().unwrap().port();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
     join(
-        start_server_ws(tcp_incoming, server_timeout),
+        start_server_ws(listener, server_timeout),
         start_client_transport(port),
     )
     .await

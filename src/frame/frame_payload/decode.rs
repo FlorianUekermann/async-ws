@@ -47,7 +47,7 @@ impl FramePayloadReaderState {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if self.payload_len <= self.completion || buf.len() == 0 {
+        if self.payload_len <= self.completion || buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
         let min = match usize::try_from(self.payload_len - self.completion) {

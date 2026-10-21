@@ -39,7 +39,7 @@ pub(crate) enum DecodeState {
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum DecodeReady {
-    Control(WsControlFrameKind),
+    Control,
     MessageStart,
     MessageData,
     MessageEnd,
@@ -66,7 +66,7 @@ impl DecodeState {
                             frame,
                             continue_message: None,
                         };
-                        Poll::Ready(DecodeReady::Control(frame.kind()))
+                        Poll::Ready(DecodeReady::Control)
                     }
                     Poll::Ready(Ok(WsFrame::Data(frame))) => match frame.kind.message_kind() {
                         Some(kind) => {
@@ -99,7 +99,7 @@ impl DecodeState {
                         frame,
                         continue_message: Some(*utf8),
                     };
-                    Poll::Ready(DecodeReady::Control(frame.kind()))
+                    Poll::Ready(DecodeReady::Control)
                 }
                 Poll::Ready(Ok(WsFrame::Data(frame))) => match frame.kind.message_kind() {
                     None => {
@@ -124,9 +124,9 @@ impl DecodeState {
             DecodeState::ReadingDataFramePayload { .. } => Poll::Ready(DecodeReady::MessageData),
             DecodeState::Err(_) => Poll::Ready(DecodeReady::Error),
             DecodeState::Done => Poll::Ready(DecodeReady::Done),
-            DecodeState::Control { frame, .. } => Poll::Ready(DecodeReady::Control(frame.kind())),
+            DecodeState::Control { .. } => Poll::Ready(DecodeReady::Control),
             DecodeState::MessageStart { .. } => Poll::Ready(DecodeReady::MessageStart),
-            DecodeState::MessageEnd { .. } => Poll::Ready(DecodeReady::MessageEnd),
+            DecodeState::MessageEnd => Poll::Ready(DecodeReady::MessageEnd),
         }
     }
     pub(crate) fn poll_read<T: AsyncRead + AsyncWrite + Unpin>(

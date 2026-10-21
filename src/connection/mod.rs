@@ -23,8 +23,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+pub(crate) type SharedConnection<T> = Arc<Mutex<(WsConnectionInner<T>, Wakers)>>;
+
 pub struct WsConnection<T: AsyncRead + AsyncWrite + Unpin> {
-    parent: Arc<Mutex<(WsConnectionInner<T>, Wakers)>>,
+    parent: SharedConnection<T>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> WsConnection<T> {

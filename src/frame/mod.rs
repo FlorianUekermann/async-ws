@@ -32,11 +32,11 @@ impl WsFrame {
         let payload_buffer = &mut buffer[frame_head.len_bytes()..total];
         payload_buffer.copy_from_slice(frame_payload);
         payload_mask(frame_head.mask, 0, payload_buffer);
-        return total;
+        total
     }
     pub fn encode_vec(frame_head: FrameHead, frame_payload: &[u8]) -> Vec<u8> {
         let mut buffer = vec![0u8; frame_head.len_bytes() + frame_payload.len()];
-        WsFrame::encode(frame_head, frame_payload, &mut *buffer);
+        WsFrame::encode(frame_head, frame_payload, &mut buffer);
         buffer
     }
 }
@@ -153,7 +153,7 @@ impl WsControlFrame {
         Self { kind, payload }
     }
     pub fn payload(&self) -> &[u8] {
-        &self.payload.data()
+        self.payload.data()
     }
     pub fn kind(&self) -> WsControlFrameKind {
         self.kind
